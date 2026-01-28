@@ -26,3 +26,4 @@ python download_3RScan.py -o 3RScan
 ### Notebooks
 
 - study the notebook familiarize_3dssg.ipynb
+- study the notebook llm_3dsg.ipynb
