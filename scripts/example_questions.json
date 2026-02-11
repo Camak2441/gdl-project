@@ -1,0 +1,58 @@
+{
+    "spatial": {
+        "description": "These questions are about spatial relationships, such as nearby objects or objects in particular directions.",
+        "examples": [
+            "What is the bottle near to the table?",
+            "Which box is closest to the window?",
+            "What is to the left of the toilet?",
+            "Which bucket is to the right of the bin?",
+            "What is the bottle close to the shower?",
+            "What is in front of the bin?",
+            "What is behind the stool?",
+            "What is between the toilet and the sink?",
+            "What is inside the cupboard?",
+            "What is to the right of the chair and behind the air conditioner?"
+        ]
+    },
+    "support": {
+        "description": "These questions are about support relationships, such as which objects support each other and how they do so.",
+        "examples": [
+            "Which bottle is on the table?",
+            "What does the shower curtain hang from?",
+            "Which clothes hanger is on the radiator?",
+            "What supports the clothes hanger?",
+            "What is attached to the wall?",
+            "What is hanging on the door?",
+            "What supports the bottle?",
+            "Which jumper is lying on the bed?"
+        ]
+    },
+    "semantic": {
+        "description": "These questions are about properties of the objects, such as their size, shape, color, and texture.",
+        "examples": [
+            "Where is the largest bottle in the room?",
+            "What is the most red object?",
+            "What is the smallest bucket in the room?",
+            "Which pillow is heart shaped?",
+            "Which door is half open?",
+            "What wall has been written on?",
+            "Which table is circuler?",
+            "Which computer is new?",
+            "What is the most comfortable chair in the room?",
+            "Which table is the cleanest?",
+            "Which sofa is white?",
+            "Which sofa has the same texture as the chair?",
+            "What is the most comfortable chair to sit in?",
+            "Which object on the table can be read?",
+            "Which washing machine is on?"
+        ]
+    },
+    "compound": {
+        "description": "",
+        "examples": []
+    },
+    "complex": {
+        "description": "",
+        "examples": []
+    }
+}
