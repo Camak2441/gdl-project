@@ -1,0 +1,8 @@
+{
+    "gpt-oss:20b": {
+        "source": "ollama",
+        "fixedTemp": false,
+        "reasoning": true,
+        "maxOutputTokens": 131072
+    }
+}

@@ -2,3 +2,6 @@
 3RScan/
 __pycache__/
 *.pyc
+outputs/
+data/*/
+.vscode/
