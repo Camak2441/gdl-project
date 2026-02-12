@@ -7,15 +7,17 @@ import h5py
 from consts import DATA_DIR, OUTPUT_DIR
 from data.utils import get_queried_graph_dataset
 from stats import generate_training_stats, save_training_stats, update_epoch_stats
-from train.utils import eval_model, train
-from models import load_model
+from train.utils import EVAL_STATS, eval_model, train
+from models import canonical_model_name, load_model
 
 
 MODEL_OUT_DIR = OUTPUT_DIR / "models"
 STATS_OUT_DIR = OUTPUT_DIR / "stats"
 
 
-MODEL_NAME = "query_gat_384,128,128,128"
+MODEL_NAME = canonical_model_name(
+    "QueryInGat(in_dim=384,query_dim=384,hidden_dims=[64,64,64,64],edge_dim=384,out_dim=1,heads=10)"
+)
 
 
 NODE_DIM = 384
@@ -24,7 +26,7 @@ QUERY_DIM = 384
 OUT_DIM = 1
 
 
-EPOCHS = 100
+EPOCHS = 1000
 
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -33,12 +35,17 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 def run_experiment(
     model: torch.nn.Module, train_set, test_set, val_set, n_epochs=100, device=DEVICE
 ):
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
 
     pbar = trange(n_epochs)
 
     training_stats = generate_training_stats(
-        {"loss": "epoch", "test_loss": "epoch", "val_loss": "epoch"}, n_epochs=n_epochs
+        {
+            "loss": "epoch",
+            **{"val_" + key: "epoch" for key in EVAL_STATS},
+            **{"test_" + key: "epoch" for key in EVAL_STATS},
+        },
+        n_epochs=n_epochs,
     )
 
     criterion = torch.nn.L1Loss()
@@ -51,16 +58,20 @@ def run_experiment(
             criterion=criterion,
             device=device,
         )
-        test_loss = eval_model(
-            model=model, dataset=test_set, criterion=criterion, device=device
-        )
-        val_loss = eval_model(
+        val_stats = eval_model(
             model=model, dataset=val_set, criterion=criterion, device=device
+        )
+        test_stats = eval_model(
+            model=model, dataset=test_set, criterion=criterion, device=device
         )
 
         update_epoch_stats(
             stats=training_stats,
-            epoch_stats={"loss": loss, "test_loss": test_loss, "val_loss": val_loss},
+            epoch_stats={
+                "loss": loss,
+                **{"val_" + key: val_stats[key] for key in val_stats},
+                **{"test_" + key: test_stats[key] for key in test_stats},
+            },
             epoch=epoch,
         )
 
@@ -115,9 +126,9 @@ def main():
         DATA_DIR / "dataset" / "val", batch_size=100, num_workers=4, pin_memory=True
     )
 
-    print("Loading model...")
+    print(f"Loading model {MODEL_NAME}...")
 
-    model = load_model(NODE_DIM, QUERY_DIM, EDGE_DIM, OUT_DIM, MODEL_NAME)
+    model = load_model(MODEL_NAME)
 
     print("Running on device", DEVICE)
 
@@ -130,9 +141,9 @@ def main():
     this_model_dir.mkdir(exist_ok=True, parents=True)
     torch.save(model.state_dict(), this_model_dir / (str(EPOCHS) + ".pth"))
 
-    STATS_OUT_DIR.mkdir(exist_ok=True, parents=True)
-    this_model_stats_dir = STATS_OUT_DIR / (MODEL_NAME + ".h5")
-    save_training_stats(training_stats, this_model_stats_dir)
+    this_model_stats_dir = STATS_OUT_DIR / MODEL_NAME
+    this_model_stats_dir.mkdir(exist_ok=True, parents=True)
+    save_training_stats(training_stats, this_model_stats_dir / (str(EPOCHS) + ".h5"))
 
 
 if __name__ == "__main__":

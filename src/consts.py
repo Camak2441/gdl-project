@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import torch
+
 SOURCE_DIR = Path(__file__).parent
 PROJECT_ROOT = SOURCE_DIR.parent
 SCRIPT_DIR = PROJECT_ROOT / "scripts"
@@ -18,3 +20,6 @@ Q_TYPES = {
     "spatial": 1,
     "support": 2,
 }
+
+
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"

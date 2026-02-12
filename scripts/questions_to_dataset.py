@@ -55,6 +55,10 @@ def encode_edge(edge):
     return torch.tensor(SENTENCE_ENCODER.encode([edge_desc]).squeeze())
 
 
+def encode_query(query):
+    return torch.tensor(SENTENCE_ENCODER.encode([query]).squeeze())
+
+
 def load_questions_metadata(q_path):
     """Load question file and return scan_id and list of question types."""
     with open(q_path) as fp:
@@ -120,7 +124,7 @@ def save_questions_for_split(
             y=torch.tensor(
                 [1.0 if node in q["answerObjectIds"] else 0.0 for node in node_map]
             ),
-            query=torch.tensor(SENTENCE_ENCODER.encode(q["question"])),
+            query=encode_query(q["question"]),
             qtype=torch.tensor([Q_TYPES[q["type"]]], dtype=torch.int16),
         )
         torch.save(query_data, output_dir / (scan_id + "_" + str(id) + ".pth"))

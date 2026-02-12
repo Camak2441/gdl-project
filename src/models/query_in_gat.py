@@ -1,9 +1,10 @@
 import torch
 import torch_geometric
+from torch_geometric.nn.conv import GATConv
 from layers import QueryGATConv
 
 
-class QueryGAT(torch.nn.Module):
+class QueryInGAT(torch.nn.Module):
 
     def __init__(self, in_dim, query_dim, hidden_dims, out_dim, edge_dim, heads=1):
         super().__init__()
@@ -29,21 +30,17 @@ class QueryGAT(torch.nn.Module):
                 )
             elif i + 1 < len(l_in_dims):
                 layers.append(
-                    QueryGATConv(
-                        in_dim=l_in_dims[i] * heads,
-                        query_dim=query_dim,
-                        out_dim=l_out_dims[i],
-                        edge_dim=edge_dim,
+                    GATConv(
+                        in_channels=l_in_dims[i] * heads,
+                        out_channels=l_out_dims[i],
                         heads=heads,
                     )
                 )
             else:
                 layers.append(
-                    QueryGATConv(
-                        in_dim=l_in_dims[i] * heads,
-                        query_dim=query_dim,
-                        out_dim=l_out_dims[i],
-                        edge_dim=edge_dim,
+                    GATConv(
+                        in_channels=l_in_dims[i] * heads,
+                        out_channels=l_out_dims[i],
                         heads=1,
                     )
                 )
@@ -54,15 +51,21 @@ class QueryGAT(torch.nn.Module):
         self.softmax = torch.nn.Softmax(dim=0)
 
     def forward(self, x, edge_index, edge_attr, query, batch):
-        for id, layer in enumerate(self.layers):
+        x = self.layers[0](
+            x=x,
+            edge_index=edge_index,
+            edge_attr=edge_attr,
+            query=query,
+            batch=batch,
+        )
+        x = self.relu(x)
+        for id, layer in enumerate(self.layers[1:]):
             x = layer(
                 x=x,
                 edge_index=edge_index,
                 edge_attr=edge_attr,
-                query=query,
-                batch=batch,
             )
-            if id + 1 == len(self.layers):
+            if id + 2 == len(self.layers):
                 x = torch_geometric.utils.softmax(x.squeeze(), batch)
             else:
                 x = self.relu(x)
