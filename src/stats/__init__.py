@@ -29,6 +29,14 @@ def update_epoch_stats(stats, epoch_stats, epoch, stats_schema=None):
 
 
 def save_training_stats(stats, path):
-    with h5py.File(path, "w") as hdf5_file:
+    with h5py.File(path, "w") as hf:
         for key in stats:
-            hdf5_file.create_dataset(name=key, data=stats[key])
+            hf.create_dataset(name=key, data=stats[key])
+
+
+def load_training_stats(path):
+    stats = {}
+    with h5py.File(path, "r") as hf:
+        for key in hf:
+            stats[key] = hf.get(key)[:]
+    return stats

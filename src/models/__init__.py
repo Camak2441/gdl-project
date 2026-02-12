@@ -49,10 +49,10 @@ def load_model(model_name: str):
             return MODEL_PREFIXES[prefix](**kwargs)
 
 
-def get_most_epochs_weight_file(model_dir: Path):
+def get_most_epochs_file(model_dir: Path):
     most_epochs = None
     for model_path in model_dir.iterdir():
-        if re.match(r"0|[1-9][0-9]*", model_path.stem) and model_path.suffix == ".pth":
+        if re.match(r"0|[1-9][0-9]*", model_path.stem):
             file_epochs = int(model_path.stem)
             if most_epochs is None or file_epochs > most_epochs:
                 most_epochs = file_epochs
