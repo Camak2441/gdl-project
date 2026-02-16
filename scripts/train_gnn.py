@@ -14,15 +14,19 @@ MODEL_OUT_DIR = OUTPUT_DIR / "models"
 STATS_OUT_DIR = OUTPUT_DIR / "stats"
 
 
-MODEL_NAME = canonical_model_name(
-    "QueryInGat(in_dim=384,query_dim=384,hidden_dims=[128,128,128,128],edge_dim=384,out_dim=1,heads=4)"
+EDGE_ENCODER = "all_minilm_l6v2"
+NODE_ENCODER = "all_minilm_l6v2"
+QUERY_ENCODER = "all_minilm_l6v2"
+
+
+DATASET_DIR = (
+    DATA_DIR / "dataset" / ";".join([EDGE_ENCODER, NODE_ENCODER, QUERY_ENCODER])
 )
 
 
-NODE_DIM = 384
-EDGE_DIM = 384
-QUERY_DIM = 384
-OUT_DIM = 1
+MODEL_NAME = canonical_model_name(
+    f"QueryInGat(e_enc={EDGE_ENCODER},n_enc={NODE_ENCODER},q_enc={QUERY_ENCODER},hidden_dims=[128,128,128,128],out_dim=1,heads=4)"
+)
 
 
 EPOCHS = 1000
@@ -119,17 +123,17 @@ def main():
     print("Loading datasets...")
 
     train_set = get_queried_graph_dataset(
-        DATA_DIR / "dataset" / "train",
+        DATASET_DIR / "train",
         batch_size=100,
         shuffle=True,
         num_workers=4,
         pin_memory=True,
     )
     test_set = get_queried_graph_dataset(
-        DATA_DIR / "dataset" / "test", batch_size=100, num_workers=4, pin_memory=True
+        DATASET_DIR / "test", batch_size=100, num_workers=4, pin_memory=True
     )
     val_set = get_queried_graph_dataset(
-        DATA_DIR / "dataset" / "val", batch_size=100, num_workers=4, pin_memory=True
+        DATASET_DIR / "val", batch_size=100, num_workers=4, pin_memory=True
     )
 
     print(f"Loading model {MODEL_NAME}...")

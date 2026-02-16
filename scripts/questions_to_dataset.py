@@ -6,12 +6,17 @@ from sentence_transformers import SentenceTransformer
 
 from consts import DATA_DIR, Q_TYPES
 from data import QueryData
+from encoders import get_edge_encoder, get_node_encoder, get_query_encoder
 from json_validator import generate_json_schema
 from ssg import SceneGraph3D
-from utils import intersect_dict
 
+EDGE_ENCODER = "all_minilm_l6v2"
+NODE_ENCODER = "all_minilm_l6v2"
+QUERY_ENCODER = "all_minilm_l6v2"
 
-DATASET_DIR = DATA_DIR / "dataset"
+DATASET_DIR = (
+    DATA_DIR / "dataset" / ";".join([EDGE_ENCODER, NODE_ENCODER, QUERY_ENCODER])
+)
 TRAIN_DATASET_DIR = DATASET_DIR / "train"
 TEST_DATASET_DIR = DATASET_DIR / "test"
 VAL_DATASET_DIR = DATASET_DIR / "val"
@@ -44,21 +49,9 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 SENTENCE_ENCODER = SentenceTransformer("all-MiniLM-L6-v2", device=device)
 
 
-def encode_node(nodes):
-    descs = []
-    for node in nodes:
-        node = intersect_dict({"ply_color", "label", "affordances", "attributes"}, node)
-        descs.append(json.dumps(node))
-    return torch.tensor(SENTENCE_ENCODER.encode(descs))
-
-
-def encode_edge(edges):
-    descs = [", ".join(edge_d["name"] for edge_d in edge) for edge in edges]
-    return torch.tensor(SENTENCE_ENCODER.encode(descs))
-
-
-def encode_query(query):
-    return torch.tensor(SENTENCE_ENCODER.encode([query]).squeeze())
+encode_node = get_node_encoder(NODE_ENCODER)
+encode_edge = get_edge_encoder(EDGE_ENCODER)
+encode_query = get_query_encoder(QUERY_ENCODER)
 
 
 def load_questions_metadata(q_path):
