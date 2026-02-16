@@ -37,7 +37,9 @@ def eval_model(model, dataset, criterion, device=DEVICE):
         loss = criterion(out, data.y)
         total_loss += loss.item() * data.batch_size
 
-        ranks = torch_geometric.utils.group_argsort(out, data.batch) + 1
+        ranks = (
+            torch_geometric.utils.group_argsort(out, data.batch, descending=True) + 1
+        )
         answer_ranks = ranks * data.y
         recall_1 = get_recall_n(answer_ranks, 1)
         recall_3 = get_recall_n(answer_ranks, 3)

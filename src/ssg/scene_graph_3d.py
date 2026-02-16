@@ -253,8 +253,8 @@ class SceneGraph3D:
     @staticmethod
     def to_query_data(
         scenegraph,
-        node_encoder: Callable[[Dict[str, Any]], Tensor],
-        edge_encoder: Callable[[List[Dict[str, Any]]], Tensor],
+        node_encoder: Callable[[List[Dict[str, Any]]], Tensor],
+        edge_encoder: Callable[[List[List[Dict[str, Any]]]], Tensor],
         y_correct_nodes: Optional[List[str]] = None,
         ret_node_maps: bool = False,
     ):
@@ -268,12 +268,11 @@ class SceneGraph3D:
         inv_node_map = {str(node_map[i]): i for i in range(len(node_map))}
         assert len(node_map) == len(inv_node_map), "Node ids must be unique"
 
-        x = torch.stack(
-            [
-                node_encoder(scenegraph.nodes(data=True)[int(node_map[node_id])])
-                for node_id in range(len(node_map))
-            ]
-        )
+        node_data = [
+            scenegraph.nodes(data=True)[int(node_map[node_id])]
+            for node_id in range(len(node_map))
+        ]
+        x = node_encoder(node_data)
 
         edge_index_map: Dict[Tuple[int, int], int] = {}
         edge_sources: List[int] = []
@@ -293,7 +292,7 @@ class SceneGraph3D:
                 edge_attr_args.append([d])
 
         edge_index = torch.tensor([edge_sources, edge_dests], dtype=torch.long)
-        edge_attr = torch.stack([edge_encoder(args) for args in edge_attr_args])
+        edge_attr = edge_encoder(edge_attr_args)
 
         pos = []
         for node_id in node_map:

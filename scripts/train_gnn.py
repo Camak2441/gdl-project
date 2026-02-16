@@ -1,8 +1,7 @@
 from tqdm import trange
 import torch
 import numpy as np
-import matplotlib as plt
-import h5py
+import matplotlib.pyplot as plt
 
 from consts import DATA_DIR, OUTPUT_DIR
 from data.utils import get_queried_graph_dataset
@@ -16,7 +15,7 @@ STATS_OUT_DIR = OUTPUT_DIR / "stats"
 
 
 MODEL_NAME = canonical_model_name(
-    "QueryInGat(in_dim=384,query_dim=384,hidden_dims=[64,64,64,64],edge_dim=384,out_dim=1,heads=10)"
+    "QueryInGat(in_dim=384,query_dim=384,hidden_dims=[128,128,128,128],edge_dim=384,out_dim=1,heads=4)"
 )
 
 
@@ -35,7 +34,11 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 def run_experiment(
     model: torch.nn.Module, train_set, test_set, val_set, n_epochs=100, device=DEVICE
 ):
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="min", factor=0.9, patience=5, min_lr=0.00001
+    )
 
     pbar = trange(n_epochs)
 
@@ -51,6 +54,8 @@ def run_experiment(
     criterion = torch.nn.L1Loss()
 
     for epoch in pbar:
+        lr = scheduler.optimizer.param_groups[0]["lr"]
+
         loss = train(
             model=model,
             optimizer=optimizer,
@@ -75,7 +80,8 @@ def run_experiment(
             epoch=epoch,
         )
 
-        pbar.set_description(f"loss = {loss:.4f}")
+        scheduler.step(val_stats["loss"])
+        pbar.set_description(f"loss={loss:.4f}, lr={lr:.6f}")
 
     return training_stats
 

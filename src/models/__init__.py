@@ -5,12 +5,14 @@ from typing import Any, Dict
 
 from models.query_gat import QueryGAT
 from models.query_in_gat import QueryInGAT
+from models.query_in_gatv2 import QueryInGATv2
 from utils import check_keys_are_in_order, quote_json
 
 
 MODEL_PREFIXES = {
     "QueryGat": QueryGAT,
     "QueryInGat": QueryInGAT,
+    "QueryInGatv2": QueryInGATv2,
 }
 
 
@@ -23,7 +25,7 @@ def canonical_model_name(model_name: str):
         if model_name.startswith(prefix):
             argstr = model_name[len(prefix) :]
             if not (argstr.startswith("(") and argstr.endswith(")")):
-                return
+                continue
             kwargs = _load_argstr(argstr)
             return (
                 prefix
@@ -33,6 +35,7 @@ def canonical_model_name(model_name: str):
                 ).replace('"', "")[1:-1]
                 + ")"
             )
+    raise Exception(f"Unknown model {model_name}")
 
 
 def load_model(model_name: str):
@@ -40,13 +43,14 @@ def load_model(model_name: str):
         if model_name.startswith(prefix):
             argstr = model_name[len(prefix) :]
             if not (argstr.startswith("(") and argstr.endswith(")")):
-                return
+                continue
             kwargs = _load_argstr(argstr)
             if not check_keys_are_in_order(kwargs):
                 return
             if "tag" in kwargs:
                 kwargs.pop("tag")
             return MODEL_PREFIXES[prefix](**kwargs)
+    raise Exception(f"Unknown model {model_name}")
 
 
 def get_most_epochs_file(model_dir: Path):

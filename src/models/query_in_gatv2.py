@@ -1,9 +1,10 @@
 import torch
 import torch_geometric
-from layers import QueryGATConv
+from torch_geometric.nn.conv import GATv2Conv
+from layers import QueryGATv2Conv
 
 
-class QueryGAT(torch.nn.Module):
+class QueryInGATv2(torch.nn.Module):
 
     def __init__(self, in_dim, query_dim, hidden_dims, out_dim, edge_dim, heads=1):
         super().__init__()
@@ -19,7 +20,7 @@ class QueryGAT(torch.nn.Module):
         for i in range(len(l_in_dims)):
             if i == 0:
                 layers.append(
-                    QueryGATConv(
+                    QueryGATv2Conv(
                         in_dim=l_in_dims[i],
                         query_dim=query_dim,
                         out_dim=l_out_dims[i],
@@ -29,20 +30,18 @@ class QueryGAT(torch.nn.Module):
                 )
             elif i + 1 < len(l_in_dims):
                 layers.append(
-                    QueryGATConv(
-                        in_dim=l_in_dims[i] * heads,
-                        query_dim=query_dim,
-                        out_dim=l_out_dims[i],
+                    GATv2Conv(
+                        in_channels=l_in_dims[i] * heads,
+                        out_channels=l_out_dims[i],
                         edge_dim=edge_dim,
                         heads=heads,
                     )
                 )
             else:
                 layers.append(
-                    QueryGATConv(
-                        in_dim=l_in_dims[i] * heads,
-                        query_dim=query_dim,
-                        out_dim=l_out_dims[i],
+                    GATv2Conv(
+                        in_channels=l_in_dims[i] * heads,
+                        out_channels=l_out_dims[i],
                         edge_dim=edge_dim,
                         heads=1,
                     )
@@ -53,15 +52,21 @@ class QueryGAT(torch.nn.Module):
         self.relu = torch.nn.ReLU()
 
     def forward(self, x, edge_index, edge_attr, query, batch):
-        for id, layer in enumerate(self.layers):
+        x = self.layers[0](
+            x=x,
+            edge_index=edge_index,
+            edge_attr=edge_attr,
+            query=query,
+            batch=batch,
+        )
+        x = self.relu(x)
+        for id, layer in enumerate(self.layers[1:]):
             x = layer(
                 x=x,
                 edge_index=edge_index,
                 edge_attr=edge_attr,
-                query=query,
-                batch=batch,
             )
-            if id + 1 == len(self.layers):
+            if id + 2 == len(self.layers):
                 x = torch_geometric.utils.softmax(x.squeeze(), batch)
             else:
                 x = self.relu(x)

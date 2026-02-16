@@ -44,15 +44,17 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 SENTENCE_ENCODER = SentenceTransformer("all-MiniLM-L6-v2", device=device)
 
 
-def encode_node(node):
-    node = intersect_dict({"ply_color", "label", "affordances", "attributes"}, node)
-    node_desc = json.dumps(node)
-    return torch.tensor(SENTENCE_ENCODER.encode([node_desc]).squeeze())
+def encode_node(nodes):
+    descs = []
+    for node in nodes:
+        node = intersect_dict({"ply_color", "label", "affordances", "attributes"}, node)
+        descs.append(json.dumps(node))
+    return torch.tensor(SENTENCE_ENCODER.encode(descs))
 
 
-def encode_edge(edge):
-    edge_desc = ", ".join(edge_d["name"] for edge_d in edge)
-    return torch.tensor(SENTENCE_ENCODER.encode([edge_desc]).squeeze())
+def encode_edge(edges):
+    descs = [", ".join(edge_d["name"] for edge_d in edge) for edge in edges]
+    return torch.tensor(SENTENCE_ENCODER.encode(descs))
 
 
 def encode_query(query):

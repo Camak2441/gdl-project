@@ -33,6 +33,7 @@ class QueryInGAT(torch.nn.Module):
                     GATConv(
                         in_channels=l_in_dims[i] * heads,
                         out_channels=l_out_dims[i],
+                        edge_dim=edge_dim,
                         heads=heads,
                     )
                 )
@@ -41,6 +42,7 @@ class QueryInGAT(torch.nn.Module):
                     GATConv(
                         in_channels=l_in_dims[i] * heads,
                         out_channels=l_out_dims[i],
+                        edge_dim=edge_dim,
                         heads=1,
                     )
                 )
@@ -48,7 +50,6 @@ class QueryInGAT(torch.nn.Module):
         self.layers = torch.nn.ModuleList(layers)
 
         self.relu = torch.nn.ReLU()
-        self.softmax = torch.nn.Softmax(dim=0)
 
     def forward(self, x, edge_index, edge_attr, query, batch):
         x = self.layers[0](
