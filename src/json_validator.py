@@ -49,8 +49,7 @@ _json_none = _JSONNone()
 
 class JSONType(ABC):
     @abstractmethod
-    def validate(self, data) -> Generator[SchemaMismatch, None, None]:
-        pass
+    def validate(self, data) -> Generator[SchemaMismatch, None, None]: ...
 
     def valid(self, data) -> bool:
         for _ in self.validate(data):
@@ -64,8 +63,7 @@ class JSONType(ABC):
 
 class PreJSONType(ABC):
     @abstractmethod
-    def generate(self) -> JSONType:
-        pass
+    def generate(self) -> JSONType: ...
 
 
 class _JSONPrimitive(JSONType):

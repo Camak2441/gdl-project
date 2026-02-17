@@ -19,6 +19,7 @@ Q_TYPES = {
     "semantic": 0,
     "spatial": 1,
     "support": 2,
+    "compound": 3,
 }
 
 
