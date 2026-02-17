@@ -20,6 +20,9 @@ DATASET_DIR = (
 TRAIN_DATASET_DIR = DATASET_DIR / "train"
 TEST_DATASET_DIR = DATASET_DIR / "test"
 VAL_DATASET_DIR = DATASET_DIR / "val"
+EMBEDDED_SCENE_GRAPH_DIR = (
+    DATASET_DIR / "embedded_scene_graphs" / ";".join([EDGE_ENCODER, NODE_ENCODER])
+)
 QUESTIONS_DIR = DATA_DIR / "questions"
 SCENE_GRAPH_DIR = DATA_DIR / "scene_graphs"
 
@@ -68,11 +71,20 @@ def load_questions_metadata(q_path):
 
 
 def embed_scene_graph(scan_id):
-    """Embed a scene graph once and return the cached data.
+    """Embed a scene graph and return the data, using a disk cache.
+
+    Loads from EMBEDDED_SG_DIR if a cached embedding exists, otherwise
+    computes the embedding and saves it for future use.
 
     Returns:
         Tuple of (data, node_map) or (None, None) if failed
     """
+    cache_path = EMBEDDED_SCENE_GRAPH_DIR / (scan_id + ".pth")
+
+    if cache_path.exists():
+        cached = torch.load(cache_path, weights_only=False)
+        return cached["data"], cached["node_map"]
+
     scenegraph = SceneGraph3D.from_json(SCENE_GRAPH_DIR / (scan_id + ".json"))
 
     if scenegraph is None:
@@ -86,6 +98,9 @@ def embed_scene_graph(scan_id):
         edge_encoder=encode_edge,
         ret_node_maps=True,
     )
+
+    EMBEDDED_SCENE_GRAPH_DIR.mkdir(parents=True, exist_ok=True)
+    torch.save({"data": data, "node_map": node_map}, cache_path)
 
     return data, node_map
 

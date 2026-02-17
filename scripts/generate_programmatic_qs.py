@@ -6,6 +6,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Set, Tuple
 
+from ssg import load_scene_graph
+
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from consts import DATA_DIR
 
@@ -96,16 +98,11 @@ INVERSE_COMPARATIVE = {
 }
 
 RANDOM_SEED = 42
-MAX_QUESTIONS_PER_SCENE = 30
+MAX_QUESTIONS_PER_SCENE = 100
 MIN_ANSWERS = 1
 MAX_ANSWERS = 10
 
-MAX_CANDIDATES_PER_STRATEGY = 200
-
-
-def load_scene_graph(path: Path) -> Dict[str, Any]:
-    with open(path) as f:
-        return json.load(f)
+MAX_CANDIDATES_PER_STRATEGY = 500
 
 
 def build_indices(sg: Dict) -> Tuple[Dict, Dict, Dict]:
@@ -129,11 +126,6 @@ def get_article(label: str) -> str:
     return "a"
 
 
-# ---------------------------------------------------------------------------
-# Predicate types
-# ---------------------------------------------------------------------------
-
-
 class Predicate(ABC):
     @abstractmethod
     def evaluate(
@@ -146,9 +138,8 @@ class Predicate(ABC):
     @abstractmethod
     def category(self) -> str: ...
 
-    def resolve_references(self, obj_by_id: Dict, rng: random.Random) -> None:
-        """Optionally resolve contextual details (e.g. article choice) before
-        text generation. Subclasses may override; default is a no-op."""
+    @abstractmethod
+    def resolve_references(self, obj_by_id: Dict, rng: random.Random) -> None: ...
 
 
 class HasLabel(Predicate):
@@ -162,9 +153,6 @@ class HasLabel(Predicate):
         return f"{get_article(self.label)} {self.label}"
 
     def category(self):
-        # A label constraint is a filter, not a question category.
-        # Returning None lets the other predicates determine the type
-        # (e.g. label + support → support, not compound).
         return None
 
 
@@ -271,23 +259,18 @@ class IsSuperlative(Predicate):
         self.inverse_rel = INVERSE_COMPARATIVE[comp_rel]
 
     def evaluate(self, obj_id, obj_by_id, outgoing, incoming):
-        # Must have at least one outgoing comparative edge
         has_outgoing = any(
             rname == self.comp_rel for rname, _ in outgoing.get(obj_id, [])
         )
         if not has_outgoing:
             return False
-        # Must not have any incoming edge of the same comparative
-        # (i.e. nothing else claims to be "X-er than" this object)
+
         has_incoming = any(
             rname == self.comp_rel for rname, _ in incoming.get(obj_id, [])
         )
         if has_incoming:
             return False
-        # Must not have any outgoing edge of the inverse comparative
-        # (e.g. if looking for "darkest", the object must not be
-        # "brighter than" anything, because that means something
-        # else is darker than it)
+
         if self.inverse_rel is not None:
             has_outgoing_inverse = any(
                 rname == self.inverse_rel for rname, _ in outgoing.get(obj_id, [])
@@ -366,7 +349,6 @@ def evaluate_predicates(
 
 
 def _pluralize(label: str) -> str:
-    """Simple pluralisation for object labels."""
     if (
         label.endswith("s")
         or label.endswith("x")
@@ -392,10 +374,7 @@ def predicates_to_question(
         else:
             prop_parts.append(p.to_text())
 
-    # Choose between "Which" and "What"
     interrogative = rng.choice(["Which", "Which", "What"])
-
-    # Choose singular vs plural based on answer count
     use_plural = num_answers > 1 and rng.random() < 0.4
 
     if label_part and prop_parts:

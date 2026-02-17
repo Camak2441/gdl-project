@@ -8,6 +8,7 @@ from datetime import datetime
 from consts import DATA_DIR, OUTPUT_DIR, SCRIPT_DIR
 from llm_clients import create_client
 from json_validator import generate_json_schema
+from ssg import load_scene_graph
 from utils import (
     index_by_key,
     intersect_dict,
@@ -281,11 +282,6 @@ def generate_questions_for_scene(client, scene_graph, q_type, scan_id):
     except Exception as e:
         logger.error(f"Error generating questions: {e}")
         return None
-
-
-def load_scene_graph(file_path):
-    with open(file_path, "r") as fp:
-        return json.load(fp)
 
 
 def save_questions(questions_data, output_path: Path):
