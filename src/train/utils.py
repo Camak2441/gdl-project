@@ -60,6 +60,7 @@ def train(model, optimizer, dataset, criterion, device=DEVICE):
     total_loss = 0
     total_samples = 0
     model.train()
+
     for data in dataset:
         data.to(device)
         optimizer.zero_grad(set_to_none=True)

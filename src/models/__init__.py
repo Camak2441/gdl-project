@@ -7,6 +7,7 @@ from encoders import get_encoded_edge_dim, get_encoded_node_dim, get_encoded_que
 from models.query_gat import QueryGAT
 from models.query_in_gat import QueryInGAT
 from models.query_in_gatv2 import QueryInGATv2
+from models.multi_query_in_gat import MultiQueryInGAT
 from utils import check_keys_are_in_order, quote_json
 
 
@@ -14,6 +15,7 @@ MODEL_PREFIXES = {
     "QueryGat": QueryGAT,
     "QueryInGat": QueryInGAT,
     "QueryInGatv2": QueryInGATv2,
+    "MultiQueryInGat": MultiQueryInGAT,
 }
 
 

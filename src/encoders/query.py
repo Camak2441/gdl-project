@@ -1,6 +1,9 @@
 import torch
-from encoders._common import ALL_MINILM_L6_V2
+from consts import DEVICE
+from encoders._common import load_sentence_transformer
 
 
-def all_minilm_l6v2_encode(query):
-    return torch.tensor(ALL_MINILM_L6_V2.encode([query]).squeeze())
+def all_minilm_l6v2_encode(queries: list[str]):
+    return torch.tensor(
+        load_sentence_transformer("all-MiniLM-L6-v2", DEVICE).encode(queries).squeeze()
+    )

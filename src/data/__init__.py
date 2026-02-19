@@ -1,1 +1,2 @@
 from data.query_data import QueryData
+from data.queried_scene_graph_dataset import QueriedSceneGraphDataset

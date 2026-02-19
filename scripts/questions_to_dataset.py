@@ -5,7 +5,6 @@ from collections import defaultdict
 from sentence_transformers import SentenceTransformer
 
 from consts import DATA_DIR, Q_TYPES
-from data import QueryData
 from encoders import get_edge_encoder, get_node_encoder, get_query_encoder
 from json_validator import generate_json_schema
 from ssg import SceneGraph3D
@@ -21,7 +20,7 @@ TRAIN_DATASET_DIR = DATASET_DIR / "train"
 TEST_DATASET_DIR = DATASET_DIR / "test"
 VAL_DATASET_DIR = DATASET_DIR / "val"
 EMBEDDED_SCENE_GRAPH_DIR = (
-    DATASET_DIR / "embedded_scene_graphs" / ";".join([EDGE_ENCODER, NODE_ENCODER])
+    DATA_DIR / "embedded_scene_graphs" / ";".join([EDGE_ENCODER, NODE_ENCODER])
 )
 QUESTIONS_DIR = DATA_DIR / "questions"
 SCENE_GRAPH_DIR = DATA_DIR / "scene_graphs"
@@ -41,16 +40,13 @@ QUESTION_SCHEMA = generate_json_schema(
             {
                 "question": str,
                 "answerObjectIds": [str],
-                "type": ("lit", "semantic", "spatial", "support"),
+                "type": ("lit", *(Q_TYPES.keys())),
             }
         ],
     }
 )
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
-
-SENTENCE_ENCODER = SentenceTransformer("all-MiniLM-L6-v2", device=device)
-
 
 encode_node = get_node_encoder(NODE_ENCODER)
 encode_edge = get_edge_encoder(EDGE_ENCODER)
@@ -105,51 +101,73 @@ def embed_scene_graph(scan_id):
     return data, node_map
 
 
+def save_scene_graph_for_split(scan_id, data, output_dir):
+    """Save the embedded scene graph Data object for a split.
+
+    Args:
+        scan_id: The scan ID (used as filename stem)
+        data: Pre-computed pyg Data object
+        output_dir: Split root directory (scene_graphs/ subdir created here)
+    """
+    scene_graphs_dir = output_dir / "scene_graphs"
+    scene_graphs_dir.mkdir(parents=True, exist_ok=True)
+    dest = scene_graphs_dir / (scan_id + ".pth")
+    if not dest.exists():
+        torch.save(data, dest)
+
+
 def save_questions_for_split(
-    scan_id, questions, question_indices, data, node_map, output_dir
+    scan_id, questions, question_indices, node_map, output_dir
 ):
-    """Save questions for a specific split using pre-computed embeddings.
+    """Save questions for a specific split as dicts with query/y/scanId keys.
 
     Args:
         scan_id: The scan ID
         questions: List of question dicts
         question_indices: Set of question indices to save (None = all)
-        data: Pre-computed graph data
         node_map: Pre-computed node map
-        output_dir: Directory to save the converted data
+        output_dir: Split root directory (questions/ subdir created here)
 
     Returns:
         Number of questions saved
     """
-    count = 0
+    questions_dir = output_dir / "questions"
+    questions_dir.mkdir(parents=True, exist_ok=True)
+
+    question_datas = {"questions": [], "ys": [], "qtypes": []}
+
     for id, q in enumerate(questions):
         if question_indices is not None and id not in question_indices:
             continue
 
-        query_data = QueryData(
-            x=data.x,
-            pos=data.pos,
-            edge_index=data.edge_index,
-            edge_attr=data.edge_attr,
-            y=torch.tensor(
+        question_datas["questions"].append(q["question"])
+        question_datas["ys"].append(
+            torch.tensor(
                 [1.0 if node in q["answerObjectIds"] else 0.0 for node in node_map]
-            ),
-            query=encode_query(q["question"]),
-            qtype=torch.tensor([Q_TYPES[q["type"]]], dtype=torch.int16),
+            )
         )
-        torch.save(query_data, output_dir / (scan_id + "_" + str(id) + ".pth"))
-        count += 1
+        question_datas["qtypes"].append(Q_TYPES[q["type"]])
 
-    return count
+    torch.save(
+        {
+            "query": encode_query(question_datas["questions"]),
+            "y": torch.stack(question_datas["ys"]),
+            "qtype": torch.tensor(question_datas["qtypes"]),
+            "scanId": scan_id,
+        },
+        questions_dir / (scan_id + ".pth"),
+    )
+
+    return len(question_datas)
 
 
 def main():
     random.seed(RANDOM_SEED)
 
     print("Ensuring dataset directories exist")
-    TRAIN_DATASET_DIR.mkdir(parents=True, exist_ok=True)
-    TEST_DATASET_DIR.mkdir(parents=True, exist_ok=True)
-    VAL_DATASET_DIR.mkdir(parents=True, exist_ok=True)
+    for split_dir in (TRAIN_DATASET_DIR, TEST_DATASET_DIR, VAL_DATASET_DIR):
+        (split_dir / "scene_graphs").mkdir(parents=True, exist_ok=True)
+        (split_dir / "questions").mkdir(parents=True, exist_ok=True)
 
     print("Loading question metadata...")
 
@@ -267,16 +285,17 @@ def main():
 
         questions = scan_to_questions_data[scan_id]
 
-        # Save questions for each split this scan contributes to
+        # Save questions and scene graph for each split this scan contributes to
         for split_name, indices in scan_splits[scan_id].items():
             if indices is None or indices:  # None means all, or non-empty set
+                split_dir = split_to_dir[split_name]
+                save_scene_graph_for_split(scan_id, data, split_dir)
                 count = save_questions_for_split(
                     scan_id,
                     questions,
                     indices,
-                    data,
                     node_map,
-                    split_to_dir[split_name],
+                    split_dir,
                 )
                 if split_name == "train":
                     train_count += count

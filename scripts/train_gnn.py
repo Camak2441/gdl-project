@@ -1,12 +1,12 @@
-from math import ceil
 from tqdm import trange
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-from torch.utils.data import RandomSampler, BatchSampler
+from torch.utils.data import random_split
+from torch_geometric.loader import DataLoader
 
 from consts import DATA_DIR, OUTPUT_DIR
-from data.utils import get_queried_graph_dataset
+from data.queried_scene_graph_dataset import QueriedSceneGraphDataset
 from stats import generate_training_stats, save_training_stats, update_epoch_stats
 from train.utils import EVAL_STATS, eval_model, train
 from models import canonical_model_name, load_model
@@ -27,12 +27,22 @@ DATASET_DIR = (
 
 
 MODEL_NAME = canonical_model_name(
-    f"QueryInGat(e_enc={EDGE_ENCODER},n_enc={NODE_ENCODER},q_enc={QUERY_ENCODER},hidden_dims=[128,128,128,128],out_dim=1,heads=4)"
+    f"MultiQueryInGat(\
+        e_enc={EDGE_ENCODER},\
+        n_enc={NODE_ENCODER},\
+        q_enc={QUERY_ENCODER},\
+        hidden_dims=[128,128,128,128],\
+        out_dim=1,\
+        heads=4\
+    )"
 )
 
 
 EPOCHS = 1000
 EPOCHS_FOR_ALL_DATA = 20
+
+
+CHECKPOINT_EPOCHS = set(range(0, 10000, 100))
 
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -41,11 +51,12 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 def run_experiment(
     model: torch.nn.Module,
     train_set,
-    test_set,
     val_set,
+    test_set,
     n_epochs=100,
     epochs_for_all_data=20,
     device=DEVICE,
+    checkpoint_epochs=set(),
 ):
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
@@ -66,29 +77,54 @@ def run_experiment(
 
     criterion = torch.nn.L1Loss()
 
-    epoch_batch_size = ceil(len(train_set) / epochs_for_all_data)
+    split = [1.0 / epochs_for_all_data] * (epochs_for_all_data - 1)
+    split.append(1 - sum(split))
 
-    epoch_sets = BatchSampler(RandomSampler(train_set), epoch_batch_size, False)
+    def make_epoch_sets():
+        nonlocal split
+        return random_split(train_set, split)
+
+    epoch_sets = make_epoch_sets()
+
+    val_loader = DataLoader(
+        val_set,
+        batch_size=512,
+        num_workers=4,
+        pin_memory=True,
+    )
+    test_loader = DataLoader(
+        test_set,
+        batch_size=512,
+        num_workers=4,
+        pin_memory=True,
+    )
 
     for epoch in pbar:
         lr = scheduler.optimizer.param_groups[0]["lr"]
 
         cycle_pos = epoch % epochs_for_all_data
         if cycle_pos == 0 and epoch > 0:
-            epoch_sets = BatchSampler(RandomSampler(train_set), epoch_batch_size, False)
+            epoch_sets = make_epoch_sets()
+
+        epoch_loader = DataLoader(
+            epoch_sets[cycle_pos],
+            batch_size=512,
+            num_workers=4,
+            pin_memory=True,
+        )
 
         loss = train(
             model=model,
             optimizer=optimizer,
-            dataset=epoch_sets[cycle_pos],
+            dataset=epoch_loader,
             criterion=criterion,
             device=device,
         )
         val_stats = eval_model(
-            model=model, dataset=val_set, criterion=criterion, device=device
+            model=model, dataset=val_loader, criterion=criterion, device=device
         )
         test_stats = eval_model(
-            model=model, dataset=test_set, criterion=criterion, device=device
+            model=model, dataset=test_loader, criterion=criterion, device=device
         )
 
         update_epoch_stats(
@@ -104,13 +140,24 @@ def run_experiment(
         scheduler.step(val_stats["loss"])
         pbar.set_description(f"loss={loss:.4f}, lr={lr:.6f}")
 
+        if epoch in checkpoint_epochs:
+            this_model_dir = MODEL_OUT_DIR / MODEL_NAME
+            this_model_dir.mkdir(exist_ok=True, parents=True)
+            torch.save(model.state_dict(), this_model_dir / (str(EPOCHS) + ".pth"))
+
+            this_model_stats_dir = STATS_OUT_DIR / MODEL_NAME
+            this_model_stats_dir.mkdir(exist_ok=True, parents=True)
+            save_training_stats(
+                training_stats, this_model_stats_dir / (str(EPOCHS) + ".h5")
+            )
+
     return training_stats
 
 
 def plot_stats(training_stats, figsize=(5, 5), name=""):
     """Create one plot for each metric stored in training_stats"""
     stats_names = [key[6:] for key in training_stats.keys() if key.startswith("train_")]
-    f, ax = plt.subplots(len(stats_names), 1, figsize=figsize)
+    _, ax = plt.subplots(len(stats_names), 1, figsize=figsize)
     if len(stats_names) == 1:
         ax = np.array([ax])
     for key, axx in zip(
@@ -139,19 +186,9 @@ def main():
 
     print("Loading datasets...")
 
-    train_set = get_queried_graph_dataset(
-        DATASET_DIR / "train",
-        batch_size=100,
-        shuffle=False,
-        num_workers=4,
-        pin_memory=True,
-    )
-    test_set = get_queried_graph_dataset(
-        DATASET_DIR / "test", batch_size=100, num_workers=4, pin_memory=True
-    )
-    val_set = get_queried_graph_dataset(
-        DATASET_DIR / "val", batch_size=100, num_workers=4, pin_memory=True
-    )
+    train_set = QueriedSceneGraphDataset(DATASET_DIR / "train")
+    val_set = QueriedSceneGraphDataset(DATASET_DIR / "val")
+    test_set = QueriedSceneGraphDataset(DATASET_DIR / "test")
 
     print(f"Loading model {MODEL_NAME}...")
 
@@ -160,15 +197,15 @@ def main():
     print("Running on device", DEVICE)
 
     model.to(DEVICE)
-    model = torch.compile(model)
     training_stats = run_experiment(
         model,
         train_set,
-        test_set,
         val_set,
+        test_set,
         n_epochs=EPOCHS,
         epochs_for_all_data=EPOCHS_FOR_ALL_DATA,
         device=DEVICE,
+        checkpoint_epochs=CHECKPOINT_EPOCHS,
     )
 
     this_model_dir = MODEL_OUT_DIR / MODEL_NAME

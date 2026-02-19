@@ -1,10 +1,10 @@
-import edge
-import node
-import query
+import encoders.edge
+import encoders.node
+import encoders.query
 
-EDGE_ENCODERS = {"all_minilm_l6v2": (edge.all_minilm_l6v2_encode, 384)}
-NODE_ENCODERS = {"all_minilm_l6v2": (node.all_minilm_l6v2_encode, 384)}
-QUERY_ENCODERS = {"all_minilm_l6v2": (query.all_minilm_l6v2_encode, 384)}
+EDGE_ENCODERS = {"all_minilm_l6v2": (encoders.edge.all_minilm_l6v2_encode, 384)}
+NODE_ENCODERS = {"all_minilm_l6v2": (encoders.node.all_minilm_l6v2_encode, 384)}
+QUERY_ENCODERS = {"all_minilm_l6v2": (encoders.query.all_minilm_l6v2_encode, 384)}
 
 
 def get_edge_encoder(encoder: str):

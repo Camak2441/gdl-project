@@ -3,7 +3,7 @@ from typing import Any, Dict
 
 from consts import DATA_DIR
 
-QUESTIONS_DIR = DATA_DIR / "questions_complex"
+QUESTIONS_DIR = DATA_DIR / "questions_complex" / "gpt-5-mini"
 
 
 def main():
