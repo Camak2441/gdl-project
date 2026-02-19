@@ -1,7 +1,9 @@
+from math import ceil
 from tqdm import trange
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
+from torch.utils.data import RandomSampler, BatchSampler
 
 from consts import DATA_DIR, OUTPUT_DIR
 from data.utils import get_queried_graph_dataset
@@ -30,13 +32,20 @@ MODEL_NAME = canonical_model_name(
 
 
 EPOCHS = 1000
+EPOCHS_FOR_ALL_DATA = 20
 
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def run_experiment(
-    model: torch.nn.Module, train_set, test_set, val_set, n_epochs=100, device=DEVICE
+    model: torch.nn.Module,
+    train_set,
+    test_set,
+    val_set,
+    n_epochs=100,
+    epochs_for_all_data=20,
+    device=DEVICE,
 ):
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
@@ -57,13 +66,21 @@ def run_experiment(
 
     criterion = torch.nn.L1Loss()
 
+    epoch_batch_size = ceil(len(train_set) / epochs_for_all_data)
+
+    epoch_sets = BatchSampler(RandomSampler(train_set), epoch_batch_size, False)
+
     for epoch in pbar:
         lr = scheduler.optimizer.param_groups[0]["lr"]
+
+        cycle_pos = epoch % epochs_for_all_data
+        if cycle_pos == 0 and epoch > 0:
+            epoch_sets = BatchSampler(RandomSampler(train_set), epoch_batch_size, False)
 
         loss = train(
             model=model,
             optimizer=optimizer,
-            dataset=train_set,
+            dataset=epoch_sets[cycle_pos],
             criterion=criterion,
             device=device,
         )
@@ -125,7 +142,7 @@ def main():
     train_set = get_queried_graph_dataset(
         DATASET_DIR / "train",
         batch_size=100,
-        shuffle=True,
+        shuffle=False,
         num_workers=4,
         pin_memory=True,
     )
@@ -143,8 +160,15 @@ def main():
     print("Running on device", DEVICE)
 
     model.to(DEVICE)
+    model = torch.compile(model)
     training_stats = run_experiment(
-        model, train_set, test_set, val_set, n_epochs=EPOCHS, device=DEVICE
+        model,
+        train_set,
+        test_set,
+        val_set,
+        n_epochs=EPOCHS,
+        epochs_for_all_data=EPOCHS_FOR_ALL_DATA,
+        device=DEVICE,
     )
 
     this_model_dir = MODEL_OUT_DIR / MODEL_NAME

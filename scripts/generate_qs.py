@@ -1,9 +1,12 @@
 import json
 import logging
+import math
 from pathlib import Path
 import re
 import random
 from datetime import datetime
+import sys
+
 
 from consts import DATA_DIR, OUTPUT_DIR, SCRIPT_DIR
 from llm_clients import create_client
@@ -14,7 +17,7 @@ from utils import (
     intersect_dict,
     lock_file,
     multi_get,
-    save_completion_prompt,
+    save_prompt_files,
     unlock_file,
 )
 
@@ -36,12 +39,13 @@ MODEL = "gpt-oss:20b"
 NUM_FORMAT_EXAMPLES = 2
 NUM_EXAMPLES = 8
 MAX_NUM_GEN_QS = 10
+TARGET_NUM_QS = 30
 
 # Paths
 SCENE_GRAPHS_DIR = DATA_DIR / "scene_graphs"
 QUESTIONS_DIR = DATA_DIR / "questions"
 EXAMPLES_PATH = SCRIPT_DIR / "example_questions.json"
-PROMPT_OUTPUT_PATH = OUTPUT_DIR / "prompt.txt"
+PROMPT_OUTPUT_DIR = OUTPUT_DIR / "prompt"
 LLM_OUTPUT_DIR = OUTPUT_DIR / "llm_outputs"
 
 # JSON Schemas
@@ -50,22 +54,23 @@ QUESTION_SCHEMA = generate_json_schema(
         "questions": [
             {
                 "question": str,
-                "answerObjectIds": [str, 1],
+                "answerObjectIds": [str],
             }
         ]
     }
 )
 
-EXAMPLES_SCHEMA = generate_json_schema(
-    ("dict", {"description": str, "examples": [str]})
-)
-
 # Load and validate the example questions
 EXAMPLE_QUESTIONS = {}
-with EXAMPLES_PATH.open() as fp:
-    EXAMPLE_QUESTIONS = json.load(fp)
 
-EXAMPLES_SCHEMA.assert_valid(EXAMPLE_QUESTIONS)
+if __name__ == "__main__":
+    EXAMPLES_SCHEMA = generate_json_schema(
+        ("dict", {"description": str, "examples": [str]})
+    )
+    with EXAMPLES_PATH.open() as fp:
+        EXAMPLE_QUESTIONS = json.load(fp)
+
+    EXAMPLES_SCHEMA.assert_valid(EXAMPLE_QUESTIONS)
 
 # Prompts
 QUESTION_GENERATION_PROMPT = """You are given a 3D scene graph in JSON format. The scene graph contains:
@@ -84,7 +89,7 @@ Generate questions of the {q_type} type. {q_description}
 - Questions must be answerable using ONLY the information in the scene graph
 - Questions should reference actual objects present in the scene
 - Vary the difficulty and complexity of questions
-- Each question should have a single, clear, unambiguous answer based on the scene graph
+- Each question should have a clear answer based on the scene graph
 
 # Output format:
 Return a JSON object which is a list of question objects.
@@ -220,7 +225,7 @@ def preprocess_scene_graph(sg_json):
     return processed
 
 
-def generate_questions_for_scene(client, scene_graph, q_type, scan_id):
+def build_messages(scene_graph, q_type):
     processed_sg = preprocess_scene_graph(scene_graph)
 
     q_type_info = EXAMPLE_QUESTIONS[q_type]
@@ -243,7 +248,7 @@ def generate_questions_for_scene(client, scene_graph, q_type, scan_id):
     )
     request_content = json.dumps({"scene_graph": processed_sg}, indent=2)
 
-    messages = [
+    return [
         {"role": "system", "content": prompt},
         {
             "role": "user",
@@ -262,8 +267,18 @@ def generate_questions_for_scene(client, scene_graph, q_type, scan_id):
         },
     ]
 
-    with open(PROMPT_OUTPUT_PATH, mode="w") as fp:
-        save_completion_prompt(messages, fp)
+
+def confirm(prompt):
+    answer = input(f"{prompt} [y/N] ").strip().lower()
+    if answer != "y":
+        logger.info("Aborted.")
+        sys.exit(0)
+
+
+def generate_questions_for_scene(client, scene_graph, q_type, scan_id):
+    messages = build_messages(scene_graph, q_type)
+
+    save_prompt_files(messages, PROMPT_OUTPUT_DIR)
 
     try:
         response = client.create_completion(messages)
@@ -315,8 +330,14 @@ def main(q_type):
     scene_graph_files = sorted(SCENE_GRAPHS_DIR.glob("*.json"))
     total_files = len(scene_graph_files)
 
+    num_calls_per_scene = math.ceil(TARGET_NUM_QS / MAX_NUM_GEN_QS)
     logger.info(f"Found {total_files} scene graphs")
     logger.info(f"Generating questions of type {q_type}")
+    confirm(
+        f"About to make up to {total_files * num_calls_per_scene} API calls "
+        f"({num_calls_per_scene} per scene × {total_files} scenes, "
+        f"targeting {TARGET_NUM_QS} questions each). Proceed?"
+    )
 
     successful = 0
     failed = 0
@@ -328,26 +349,53 @@ def main(q_type):
         logger.info(f"[{idx}/{total_files}] Processing {scan_id}...")
 
         scene_graph = load_scene_graph(sg_file)
-        questions = generate_questions_for_scene(client, scene_graph, q_type, scan_id)
 
-        if questions and "questions" in questions:
-            questions_data = {
-                "scan_id": scan_id,
-                "questions": questions["questions"],
-            }
-            save_questions(questions_data, output_file)
-            logger.info(f'Generated {len(questions["questions"])} questions')
+        num_calls = num_calls_per_scene
+        total_generated = 0
+        any_success = False
+
+        for call_idx in range(1, num_calls + 1):
+            questions = generate_questions_for_scene(
+                client, scene_graph, q_type, scan_id
+            )
+            if questions and "questions" in questions:
+                questions_data = {
+                    "scan_id": scan_id,
+                    "questions": questions["questions"],
+                }
+                save_questions(questions_data, output_file)
+                total_generated += len(questions["questions"])
+                any_success = True
+                logger.info(
+                    f"  Call {call_idx}/{num_calls}: got {len(questions['questions'])} questions"
+                    f" ({total_generated} total)"
+                )
+            else:
+                logger.warning(f"  Call {call_idx}/{num_calls}: failed")
+
+        if any_success:
+            logger.info(f"Generated {total_generated} questions for {scan_id}")
             successful += 1
         else:
-            logger.warning(f"Failed to generate questions for {scan_id}")
+            logger.warning(f"Failed to generate any questions for {scan_id}")
             failed += 1
 
     logger.info("=" * 50)
     logger.info(f"Completed: {successful} successful, {failed} failed")
 
 
-if __name__ == "__main__":
-    import sys
+def test_prompt(q_type):
+    sg_file = next(SCENE_GRAPHS_DIR.glob("*.json"))
+    scene_graph = load_scene_graph(sg_file)
+    messages = build_messages(scene_graph, q_type)
+    save_prompt_files(messages, PROMPT_OUTPUT_DIR)
 
-    for q_type in sys.argv[1:]:
-        main(q_type)
+
+if __name__ == "__main__":
+    if "--test-prompt" in sys.argv:
+        args = [a for a in sys.argv[1:] if a != "--test-prompt"]
+        q_type = args[0] if args else next(iter(EXAMPLE_QUESTIONS))
+        test_prompt(q_type)
+    else:
+        for q_type in sys.argv[1:]:
+            main(q_type)

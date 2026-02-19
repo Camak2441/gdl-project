@@ -62,7 +62,7 @@ def train(model, optimizer, dataset, criterion, device=DEVICE):
     model.train()
     for data in dataset:
         data.to(device)
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
         out = _run_model(model, data)
         loss = criterion(out, data.y)
         loss.backward()

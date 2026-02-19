@@ -25,6 +25,7 @@ chat_completion_args = {
     "model",
     "max_completion_tokens",
     "reasoning_effort",
+    "verbosity",
     "temperature",
     "timeout",
 }
@@ -45,10 +46,12 @@ class OpenAIClient:
         )
         self.kwargs = kwargs
         self.chat_completion_args = chat_completion_args.copy()
-        if kwargs.get("fixedTemp", False):
+        if kwargs.get("hasTemperature", False):
             self.chat_completion_args.remove("temperature")
-        if not kwargs.get("reasoningModel", False):
+        if not kwargs.get("hasReasoning", False):
             self.chat_completion_args.remove("reasoning_effort")
+        if not kwargs.get("hasVerbosity", False):
+            self.chat_completion_args.remove("verbosity")
         if "maxCompletionTokens" in kwargs:
             if "max_completion_tokens" in kwargs:
                 kwargs["max_completion_tokens"] = min(

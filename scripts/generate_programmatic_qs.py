@@ -3,8 +3,9 @@ import random
 import sys
 from abc import ABC, abstractmethod
 from collections import defaultdict
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Set, Tuple
+from typing import Dict, List, Set, Tuple
 
 from ssg import load_scene_graph
 
@@ -97,12 +98,23 @@ INVERSE_COMPARATIVE = {
     "lower than": "higher than",
 }
 
+BETWEEN_AXIS_PAIRS = [
+    ("to the left of", "to the right of"),
+    ("in front of", "behind"),
+    ("higher than", "lower than"),
+]
+
 RANDOM_SEED = 42
 MAX_QUESTIONS_PER_SCENE = 100
 MIN_ANSWERS = 1
 MAX_ANSWERS = 10
 
-MAX_CANDIDATES_PER_STRATEGY = 500
+MAX_ATTEMPTS_PER_QUESTION = 500
+
+
+# ---------------------------------------------------------------------------
+# Scene graph helpers
+# ---------------------------------------------------------------------------
 
 
 def build_indices(sg: Dict) -> Tuple[Dict, Dict, Dict]:
@@ -124,6 +136,11 @@ def get_article(label: str) -> str:
     if label[0].lower() in "aeiou":
         return "an"
     return "a"
+
+
+# ---------------------------------------------------------------------------
+# Predicate classes  (unchanged)
+# ---------------------------------------------------------------------------
 
 
 class Predicate(ABC):
@@ -155,6 +172,9 @@ class HasLabel(Predicate):
     def category(self):
         return None
 
+    def resolve_references(self, obj_by_id, rng):
+        pass
+
 
 class HasAttribute(Predicate):
     def __init__(self, attr_value: str, attr_category: str = None):
@@ -176,6 +196,9 @@ class HasAttribute(Predicate):
     def category(self):
         return "semantic"
 
+    def resolve_references(self, obj_by_id, rng):
+        pass
+
 
 class HasAffordance(Predicate):
     def __init__(self, affordance: str):
@@ -189,6 +212,9 @@ class HasAffordance(Predicate):
 
     def category(self):
         return "semantic"
+
+    def resolve_references(self, obj_by_id, rng):
+        pass
 
 
 class HasRelationTo(Predicate):
@@ -252,6 +278,87 @@ class HasRelationTo(Predicate):
         return "semantic"
 
 
+class HasRelationToChained(Predicate):
+    """Subject has rel_name to a target_label object that itself satisfies qualifier.
+
+    The qualifier is any Predicate evaluated on the intermediate object, enabling
+    arbitrary nesting depth.
+    """
+
+    def __init__(self, rel_name: str, target_label: str, qualifier: "Predicate"):
+        self.rel_name = rel_name
+        self.target_label = target_label
+        self.qualifier = qualifier
+
+    def evaluate(self, obj_id, obj_by_id, outgoing, incoming):
+        qualified_mids = {
+            mid_id
+            for mid_id, mid_obj in obj_by_id.items()
+            if mid_obj["label"] == self.target_label
+            and self.qualifier.evaluate(mid_id, obj_by_id, outgoing, incoming)
+        }
+        return any(
+            rname == self.rel_name and tgt_id in qualified_mids
+            for rname, tgt_id in outgoing.get(obj_id, [])
+        )
+
+    def resolve_references(self, obj_by_id, rng):
+        self.qualifier.resolve_references(obj_by_id, rng)
+
+    def to_text(self):
+        return f"{self.rel_name} the {self.target_label} {self.qualifier.to_text()}"
+
+    def category(self):
+        if self.rel_name in SPATIAL_RELS:
+            this_type = "spatial"
+        elif self.rel_name in SUPPORT_RELS:
+            this_type = "support"
+        else:
+            this_type = "semantic"
+        qual_cat = self.qualifier.category()
+        if qual_cat == "compound" or (qual_cat is not None and qual_cat != this_type):
+            return "compound"
+        return this_type
+
+
+class IsBetween(Predicate):
+    """Object lies spatially between label_a and label_b along some axis."""
+
+    def __init__(self, label_a: str, label_b: str):
+        self.label_a = label_a
+        self.label_b = label_b
+
+    def evaluate(self, obj_id, obj_by_id, outgoing, incoming):
+        labels_by_rel: Dict[str, Set[str]] = defaultdict(set)
+        for rname, tgt_id in outgoing.get(obj_id, []):
+            tgt = obj_by_id.get(tgt_id)
+            if tgt:
+                labels_by_rel[rname].add(tgt["label"])
+        for rel1, rel2 in BETWEEN_AXIS_PAIRS:
+            cond_fwd = (
+                self.label_a in labels_by_rel[rel1]
+                and self.label_b in labels_by_rel[rel2]
+            )
+            cond_rev = (
+                self.label_a in labels_by_rel[rel2]
+                and self.label_b in labels_by_rel[rel1]
+            )
+            if cond_fwd or cond_rev:
+                return True
+        return False
+
+    def resolve_references(self, obj_by_id, rng):
+        pass
+
+    def to_text(self):
+        art_a = get_article(self.label_a)
+        art_b = get_article(self.label_b)
+        return f"between {art_a} {self.label_a} and {art_b} {self.label_b}"
+
+    def category(self):
+        return "spatial"
+
+
 class IsSuperlative(Predicate):
     def __init__(self, comp_rel: str):
         self.comp_rel = comp_rel
@@ -284,6 +391,9 @@ class IsSuperlative(Predicate):
 
     def category(self):
         return "semantic"
+
+    def resolve_references(self, obj_by_id, rng):
+        pass
 
 
 class NotPredicate(Predicate):
@@ -326,16 +436,8 @@ class OrPredicate(Predicate):
 
 
 # ---------------------------------------------------------------------------
-# Question
+# Evaluation helpers  (unchanged)
 # ---------------------------------------------------------------------------
-
-
-def _join_parts(parts: List[str]) -> str:
-    if len(parts) == 1:
-        return parts[0]
-    if len(parts) == 2:
-        return f"{parts[0]} and {parts[1]}"
-    return ", ".join(parts[:-1]) + ", and " + parts[-1]
 
 
 def evaluate_predicates(
@@ -361,40 +463,6 @@ def _pluralize(label: str) -> str:
     return label + "s"
 
 
-def predicates_to_question(
-    predicates: List[Predicate],
-    num_answers: int,
-    rng: random.Random,
-) -> str:
-    label_part = None
-    prop_parts = []
-    for p in predicates:
-        if isinstance(p, HasLabel):
-            label_part = p.label
-        else:
-            prop_parts.append(p.to_text())
-
-    interrogative = rng.choice(["Which", "Which", "What"])
-    use_plural = num_answers > 1 and rng.random() < 0.4
-
-    if label_part and prop_parts:
-        noun = _pluralize(label_part) if use_plural else label_part
-        verb = "are" if use_plural else "is"
-        return f"Which {noun} {verb} {_join_parts(prop_parts)}?"
-    elif label_part:
-        noun = "objects" if use_plural else "object"
-        verb = "are" if use_plural else "is"
-        if interrogative == "What" and not use_plural and rng.random() < 0.5:
-            return f"{interrogative} {verb} {get_article(label_part)} {label_part}?"
-        return f"{interrogative} {noun} {verb} {get_article(label_part)} {label_part}?"
-    else:
-        noun = "objects" if use_plural else "object"
-        verb = "are" if use_plural else "is"
-        if interrogative == "What" and not use_plural and rng.random() < 0.5:
-            return f"{interrogative} {verb} {_join_parts(prop_parts)}?"
-        return f"{interrogative} {noun} {verb} {_join_parts(prop_parts)}?"
-
-
 def question_type(predicates: List[Predicate]) -> str:
     cats = set()
     for p in predicates:
@@ -408,23 +476,9 @@ def question_type(predicates: List[Predicate]) -> str:
     return "compound"
 
 
-def try_make_question(
-    predicates: List[Predicate],
-    obj_by_id,
-    outgoing,
-    incoming,
-    rng: random.Random,
-) -> Dict | None:
-    answers = evaluate_predicates(predicates, obj_by_id, outgoing, incoming)
-    if MIN_ANSWERS <= len(answers) <= MAX_ANSWERS:
-        for p in predicates:
-            p.resolve_references(obj_by_id, rng)
-        return {
-            "question": predicates_to_question(predicates, len(answers), rng),
-            "answerObjectIds": sorted(answers),
-            "type": question_type(predicates),
-        }
-    return None
+# ---------------------------------------------------------------------------
+# Collection helpers  (unchanged)
+# ---------------------------------------------------------------------------
 
 
 def collect_attrs(obj_by_id: Dict) -> List[Tuple[str, str]]:
@@ -467,510 +521,678 @@ def collect_labels(obj_by_id: Dict) -> List[str]:
     return list({obj["label"] for obj in obj_by_id.values()})
 
 
-def _sample_and_try(
-    rng: random.Random,
-    generators: List,
-    obj_by_id,
-    outgoing,
-    incoming,
-    count: int,
-) -> List[Dict]:
-    results = []
-    seen = set()
-    attempts = 0
-    max_attempts = count * MAX_CANDIDATES_PER_STRATEGY
-
-    while len(results) < count and attempts < max_attempts:
-        gen = rng.choice(generators)
-        preds = gen(rng)
-        if preds is None:
-            attempts += 1
+def collect_chained_rels(
+    outgoing: Dict, incoming: Dict, obj_by_id: Dict
+) -> List[Tuple[str, str, str, str]]:
+    chains: Set[Tuple[str, str, str, str]] = set()
+    for mid_id, mid_obj in obj_by_id.items():
+        mid_label = mid_obj["label"]
+        inc = incoming.get(mid_id, [])
+        out = outgoing.get(mid_id, [])
+        if not inc or not out:
             continue
-        q = try_make_question(preds, obj_by_id, outgoing, incoming, rng)
-        if q and q["question"] not in seen:
-            seen.add(q["question"])
-            results.append(q)
-        attempts += 1
-
-    return results
-
-
-def generate_semantic_questions(
-    obj_by_id,
-    outgoing,
-    incoming,
-    rng,
-    count,
-    attrs,
-    labels,
-    semantic_rels,
-    affordances,
-) -> List[Dict]:
-    if not attrs and not labels and not affordances:
-        return []
-
-    generators = []
-
-    if labels and attrs:
-
-        def gen_label_attr(rng):
-            label = rng.choice(labels)
-            v, cat = rng.choice(attrs)
-            return [HasLabel(label), HasAttribute(v, cat)]
-
-        generators.append(gen_label_attr)
-
-    if len(attrs) >= 2:
-
-        def gen_two_attrs(rng):
-            a1 = rng.choice(attrs)
-            a2 = rng.choice(attrs)
-            if a1[1] == a2[1]:
-                return None
-            return [HasAttribute(a1[0], a1[1]), HasAttribute(a2[0], a2[1])]
-
-        generators.append(gen_two_attrs)
-
-    if attrs:
-        cats = defaultdict(list)
-        for v, c in attrs:
-            cats[c].append(v)
-        multi_cats = {c: vs for c, vs in cats.items() if len(vs) >= 2}
-        if multi_cats:
-
-            def gen_attr_not(rng):
-                cat = rng.choice(list(multi_cats.keys()))
-                vs = multi_cats[cat]
-                v1, v2 = rng.sample(vs, 2)
-                return [HasAttribute(v1, cat), NotPredicate(HasAttribute(v2, cat))]
-
-            generators.append(gen_attr_not)
-
-    if attrs and semantic_rels:
-
-        def gen_attr_rel(rng):
-            v, cat = rng.choice(attrs)
-            rname, tgt = rng.choice(semantic_rels)
-            return [HasAttribute(v, cat), HasRelationTo(rname, tgt)]
-
-        generators.append(gen_attr_rel)
-
-    comp_rels_in_scene = set()
-    for rels in outgoing.values():
-        for rname, _ in rels:
-            if rname in SUPERLATIVE_MAP:
-                comp_rels_in_scene.add(rname)
-    comp_rels_list = list(comp_rels_in_scene)
-    if comp_rels_list:
-
-        def gen_superlative(rng):
-            return [IsSuperlative(rng.choice(comp_rels_list))]
-
-        generators.append(gen_superlative)
-
-        if labels:
-
-            def gen_label_super(rng):
-                return [
-                    HasLabel(rng.choice(labels)),
-                    IsSuperlative(rng.choice(comp_rels_list)),
-                ]
-
-            generators.append(gen_label_super)
-
-    if attrs and labels:
-
-        def gen_or_attrs(rng):
-            a1 = rng.choice(attrs)
-            a2 = rng.choice(attrs)
-            if a1 == a2:
-                return None
-            label = rng.choice(labels)
-            return [
-                HasLabel(label),
-                OrPredicate(HasAttribute(a1[0], a1[1]), HasAttribute(a2[0], a2[1])),
-            ]
-
-        generators.append(gen_or_attrs)
-
-    if affordances:
-
-        def gen_affordance(rng):
-            return [HasAffordance(rng.choice(affordances))]
-
-        generators.append(gen_affordance)
-
-    if labels and affordances:
-
-        def gen_label_affordance(rng):
-            label = rng.choice(labels)
-            aff = rng.choice(affordances)
-            return [HasLabel(label), HasAffordance(aff)]
-
-        generators.append(gen_label_affordance)
-
-    if attrs and affordances:
-
-        def gen_attr_affordance(rng):
-            v, cat = rng.choice(attrs)
-            aff = rng.choice(affordances)
-            return [HasAttribute(v, cat), HasAffordance(aff)]
-
-        generators.append(gen_attr_affordance)
-
-    if len(affordances) >= 2:
-
-        def gen_affordance_not(rng):
-            a1, a2 = rng.sample(affordances, 2)
-            return [HasAffordance(a1), NotPredicate(HasAffordance(a2))]
-
-        generators.append(gen_affordance_not)
-
-    if labels and attrs and affordances:
-
-        def gen_label_attr_affordance(rng):
-            label = rng.choice(labels)
-            v, cat = rng.choice(attrs)
-            aff = rng.choice(affordances)
-            return [HasLabel(label), HasAttribute(v, cat), HasAffordance(aff)]
-
-        generators.append(gen_label_attr_affordance)
-
-    if not generators:
-        return []
-
-    return _sample_and_try(rng, generators, obj_by_id, outgoing, incoming, count)
-
-
-def generate_spatial_questions(
-    obj_by_id,
-    outgoing,
-    incoming,
-    rng,
-    count,
-    spatial_rels,
-    labels,
-) -> List[Dict]:
-    if not spatial_rels:
-        return []
-
-    generators = []
-
-    def gen_single(rng):
-        rname, tgt = rng.choice(spatial_rels)
-        return [HasRelationTo(rname, tgt)]
-
-    generators.append(gen_single)
-
-    if labels:
-
-        def gen_label_spatial(rng):
-            label = rng.choice(labels)
-            rname, tgt = rng.choice(spatial_rels)
-            return [HasLabel(label), HasRelationTo(rname, tgt)]
-
-        generators.append(gen_label_spatial)
-
-    if len(spatial_rels) >= 2:
-
-        def gen_two_spatial(rng):
-            r1 = rng.choice(spatial_rels)
-            r2 = rng.choice(spatial_rels)
-            if r1 == r2:
-                return None
-            return [HasRelationTo(r1[0], r1[1]), HasRelationTo(r2[0], r2[1])]
-
-        generators.append(gen_two_spatial)
-
-    if len(spatial_rels) >= 2:
-
-        def gen_spatial_not(rng):
-            r1 = rng.choice(spatial_rels)
-            r2 = rng.choice(spatial_rels)
-            if r1 == r2:
-                return None
-            return [
-                HasRelationTo(r1[0], r1[1]),
-                NotPredicate(HasRelationTo(r2[0], r2[1])),
-            ]
-
-        generators.append(gen_spatial_not)
-
-    return _sample_and_try(rng, generators, obj_by_id, outgoing, incoming, count)
-
-
-def generate_support_questions(
-    obj_by_id,
-    outgoing,
-    incoming,
-    rng,
-    count,
-    support_rels,
-    labels,
-) -> List[Dict]:
-    if not support_rels:
-        return []
-
-    generators = []
-
-    def gen_single(rng):
-        rname, tgt = rng.choice(support_rels)
-        return [HasRelationTo(rname, tgt)]
-
-    generators.append(gen_single)
-
-    if labels:
-
-        def gen_label_support(rng):
-            label = rng.choice(labels)
-            rname, tgt = rng.choice(support_rels)
-            return [HasLabel(label), HasRelationTo(rname, tgt)]
-
-        generators.append(gen_label_support)
-
-    if len(support_rels) >= 2:
-
-        def gen_two_support(rng):
-            r1 = rng.choice(support_rels)
-            r2 = rng.choice(support_rels)
-            if r1 == r2:
-                return None
-            return [HasRelationTo(r1[0], r1[1]), HasRelationTo(r2[0], r2[1])]
-
-        generators.append(gen_two_support)
-
-    if len(support_rels) >= 2:
-
-        def gen_support_not(rng):
-            r1 = rng.choice(support_rels)
-            r2 = rng.choice(support_rels)
-            if r1 == r2:
-                return None
-            return [
-                HasRelationTo(r1[0], r1[1]),
-                NotPredicate(HasRelationTo(r2[0], r2[1])),
-            ]
-
-        generators.append(gen_support_not)
-
-    return _sample_and_try(rng, generators, obj_by_id, outgoing, incoming, count)
-
-
-def generate_compound_questions(
-    obj_by_id,
-    outgoing,
-    incoming,
-    rng,
-    count,
-    attrs,
-    labels,
-    spatial_rels,
-    support_rels,
-    semantic_rels,
-    affordances,
-) -> List[Dict]:
-    generators = []
-
-    if attrs and spatial_rels:
-
-        def gen_attr_spatial(rng):
-            v, cat = rng.choice(attrs)
-            rname, tgt = rng.choice(spatial_rels)
-            return [HasAttribute(v, cat), HasRelationTo(rname, tgt)]
-
-        generators.append(gen_attr_spatial)
-
-    if attrs and support_rels:
-
-        def gen_attr_support(rng):
-            v, cat = rng.choice(attrs)
-            rname, tgt = rng.choice(support_rels)
-            return [HasAttribute(v, cat), HasRelationTo(rname, tgt)]
-
-        generators.append(gen_attr_support)
-
-    if labels and attrs and spatial_rels:
-
-        def gen_label_attr_spatial(rng):
-            label = rng.choice(labels)
-            v, cat = rng.choice(attrs)
-            rname, tgt = rng.choice(spatial_rels)
-            return [HasLabel(label), HasAttribute(v, cat), HasRelationTo(rname, tgt)]
-
-        generators.append(gen_label_attr_spatial)
-
-    if labels and attrs and support_rels:
-
-        def gen_label_attr_support(rng):
-            label = rng.choice(labels)
-            v, cat = rng.choice(attrs)
-            rname, tgt = rng.choice(support_rels)
-            return [HasLabel(label), HasAttribute(v, cat), HasRelationTo(rname, tgt)]
-
-        generators.append(gen_label_attr_support)
-
-    if attrs and spatial_rels:
-
-        def gen_not_attr_spatial(rng):
-            v, cat = rng.choice(attrs)
-            rname, tgt = rng.choice(spatial_rels)
-            return [NotPredicate(HasAttribute(v, cat)), HasRelationTo(rname, tgt)]
-
-        generators.append(gen_not_attr_spatial)
-
-    if spatial_rels and support_rels:
-
-        def gen_spatial_support(rng):
-            r1 = rng.choice(spatial_rels)
-            r2 = rng.choice(support_rels)
-            return [HasRelationTo(r1[0], r1[1]), HasRelationTo(r2[0], r2[1])]
-
-        generators.append(gen_spatial_support)
-
-    if attrs and spatial_rels and support_rels:
-
-        def gen_triple(rng):
-            v, cat = rng.choice(attrs)
-            r1 = rng.choice(spatial_rels)
-            r2 = rng.choice(support_rels)
-            return [
-                HasAttribute(v, cat),
-                HasRelationTo(r1[0], r1[1]),
-                HasRelationTo(r2[0], r2[1]),
-            ]
-
-        generators.append(gen_triple)
-
-    if attrs and spatial_rels:
-
-        def gen_or_attr_spatial(rng):
-            v, cat = rng.choice(attrs)
-            rname, tgt = rng.choice(spatial_rels)
-            return [OrPredicate(HasAttribute(v, cat), HasRelationTo(rname, tgt))]
-
-        generators.append(gen_or_attr_spatial)
-
-    if labels and attrs and spatial_rels:
-
-        def gen_label_attr_not_spatial(rng):
-            label = rng.choice(labels)
-            v, cat = rng.choice(attrs)
-            rname, tgt = rng.choice(spatial_rels)
-            return [
-                HasLabel(label),
-                HasAttribute(v, cat),
-                NotPredicate(HasRelationTo(rname, tgt)),
-            ]
-
-        generators.append(gen_label_attr_not_spatial)
-
-    if affordances and spatial_rels:
-
-        def gen_affordance_spatial(rng):
-            aff = rng.choice(affordances)
-            rname, tgt = rng.choice(spatial_rels)
-            return [HasAffordance(aff), HasRelationTo(rname, tgt)]
-
-        generators.append(gen_affordance_spatial)
-
-    if affordances and support_rels:
-
-        def gen_affordance_support(rng):
-            aff = rng.choice(affordances)
-            rname, tgt = rng.choice(support_rels)
-            return [HasAffordance(aff), HasRelationTo(rname, tgt)]
-
-        generators.append(gen_affordance_support)
-
-    if labels and affordances and spatial_rels:
-
-        def gen_label_affordance_spatial(rng):
-            label = rng.choice(labels)
-            aff = rng.choice(affordances)
-            rname, tgt = rng.choice(spatial_rels)
-            return [HasLabel(label), HasAffordance(aff), HasRelationTo(rname, tgt)]
-
-        generators.append(gen_label_affordance_spatial)
-
-    if affordances and attrs and spatial_rels:
-
-        def gen_affordance_attr_spatial(rng):
-            aff = rng.choice(affordances)
-            v, cat = rng.choice(attrs)
-            rname, tgt = rng.choice(spatial_rels)
-            return [HasAffordance(aff), HasAttribute(v, cat), HasRelationTo(rname, tgt)]
-
-        generators.append(gen_affordance_attr_spatial)
-
-    if not generators:
-        return []
-
-    qs = _sample_and_try(rng, generators, obj_by_id, outgoing, incoming, count)
-    for q in qs:
-        q["type"] = "compound"
-    return qs
-
-
-def deduplicate_questions(questions: List[Dict]) -> List[Dict]:
-    seen = set()
-    result = []
-    for q in questions:
-        if q["question"] not in seen:
-            seen.add(q["question"])
-            result.append(q)
-    return result
-
-
-def generate_questions_for_scene(sg: Dict, rng: random.Random) -> List[Dict]:
+        for rel1, _ in inc:
+            for rel2, tgt_id in out:
+                tgt = obj_by_id.get(tgt_id)
+                if tgt:
+                    chains.add((rel1, mid_label, rel2, tgt["label"]))
+    return list(chains)
+
+
+def collect_depth3_chains(
+    outgoing: Dict, incoming: Dict, obj_by_id: Dict
+) -> List[Tuple[str, str, str, str, str, str]]:
+    chains: Set[Tuple[str, str, str, str, str, str]] = set()
+    for mid1_id, mid1_obj in obj_by_id.items():
+        mid1_label = mid1_obj["label"]
+        inc = incoming.get(mid1_id, [])
+        out1 = outgoing.get(mid1_id, [])
+        if not inc or not out1:
+            continue
+        for rel1, _ in inc:
+            for rel2, mid2_id in out1:
+                mid2_obj = obj_by_id.get(mid2_id)
+                if mid2_obj is None:
+                    continue
+                mid2_label = mid2_obj["label"]
+                for rel3, tgt_id in outgoing.get(mid2_id, []):
+                    tgt = obj_by_id.get(tgt_id)
+                    if tgt:
+                        chains.add(
+                            (rel1, mid1_label, rel2, mid2_label, rel3, tgt["label"])
+                        )
+    return list(chains)
+
+
+def collect_between_pairs(outgoing: Dict, obj_by_id: Dict) -> List[Tuple[str, str]]:
+    valid_pairs: Set[Tuple[str, str]] = set()
+    for obj_id in obj_by_id:
+        labels_by_rel: Dict[str, Set[str]] = defaultdict(set)
+        for rname, tgt_id in outgoing.get(obj_id, []):
+            tgt = obj_by_id.get(tgt_id)
+            if tgt:
+                labels_by_rel[rname].add(tgt["label"])
+        for rel1, rel2 in BETWEEN_AXIS_PAIRS:
+            for la in labels_by_rel[rel1]:
+                for lb in labels_by_rel[rel2]:
+                    if la != lb:
+                        valid_pairs.add((la, lb))
+    return list(valid_pairs)
+
+
+# ---------------------------------------------------------------------------
+# SceneData
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SceneData:
+    obj_by_id: Dict
+    outgoing: Dict
+    incoming: Dict
+    attrs: List[Tuple[str, str]]
+    attrs_by_cat: Dict[str, List[str]]
+    labels: List[str]
+    affordances: List[str]
+    spatial_rels: List[Tuple[str, str]]
+    support_rels: List[Tuple[str, str]]
+    semantic_rels: List[Tuple[str, str]]
+    comp_rels_in_scene: List[str]
+    between_pairs: List[Tuple[str, str]]
+    chains2: List[Tuple[str, str, str, str]]
+    chains3: List[Tuple[str, str, str, str, str, str]]
+
+
+def build_scene_data(sg: Dict) -> SceneData | None:
     obj_by_id, outgoing, incoming = build_indices(sg)
-
     if len(obj_by_id) < 3:
-        return []
+        return None
 
     attrs = collect_attrs(obj_by_id)
+    attrs_by_cat: Dict[str, List[str]] = defaultdict(list)
+    for v, c in attrs:
+        attrs_by_cat[c].append(v)
+
     labels = collect_labels(obj_by_id)
     affordances = collect_affordances(obj_by_id)
     spatial_rels, support_rels, semantic_rels = collect_rels_by_type(
         outgoing, obj_by_id
     )
+    comp_rels_in_scene = list(
+        {
+            rname
+            for rels in outgoing.values()
+            for rname, _ in rels
+            if rname in SUPERLATIVE_MAP
+        }
+    )
+    chains2 = collect_chained_rels(outgoing, incoming, obj_by_id)
+    chains3 = collect_depth3_chains(outgoing, incoming, obj_by_id)
+    between_pairs = collect_between_pairs(outgoing, obj_by_id)
 
-    target = MAX_QUESTIONS_PER_SCENE // 4
-
-    semantic_qs = generate_semantic_questions(
-        obj_by_id,
-        outgoing,
-        incoming,
-        rng,
-        target,
-        attrs,
-        labels,
-        semantic_rels,
-        affordances,
-    )
-    spatial_qs = generate_spatial_questions(
-        obj_by_id, outgoing, incoming, rng, target, spatial_rels, labels
-    )
-    support_qs = generate_support_questions(
-        obj_by_id, outgoing, incoming, rng, target, support_rels, labels
-    )
-    compound_qs = generate_compound_questions(
-        obj_by_id,
-        outgoing,
-        incoming,
-        rng,
-        target,
-        attrs,
-        labels,
-        spatial_rels,
-        support_rels,
-        semantic_rels,
-        affordances,
+    return SceneData(
+        obj_by_id=obj_by_id,
+        outgoing=outgoing,
+        incoming=incoming,
+        attrs=attrs,
+        attrs_by_cat=dict(attrs_by_cat),
+        labels=labels,
+        affordances=affordances,
+        spatial_rels=spatial_rels,
+        support_rels=support_rels,
+        semantic_rels=semantic_rels,
+        comp_rels_in_scene=comp_rels_in_scene,
+        between_pairs=between_pairs,
+        chains2=chains2,
+        chains3=chains3,
     )
 
-    all_qs = semantic_qs + spatial_qs + support_qs + compound_qs
-    all_qs = deduplicate_questions(all_qs)
-    rng.shuffle(all_qs)
-    return all_qs[:MAX_QUESTIONS_PER_SCENE]
+
+# ---------------------------------------------------------------------------
+# Budget-driven predicate generation
+# ---------------------------------------------------------------------------
+
+# Weights for the weighted_choice of object-predicate "moves"
+_OBJ_MOVE_WEIGHTS = {
+    "attr": 3.0,
+    "not_attr": 1.0,
+    "aff": 2.0,
+    "not_aff": 0.5,
+    "superlative": 1.5,
+    "or_attr": 1.0,
+    "or_aff": 0.5,
+}
+
+# Weights for relationship predicate form selection
+_REL_FORM_WEIGHTS = {
+    "simple": 3.0,
+    "chained": 2.0,
+    "between": 1.0,
+}
+
+# Complexity distribution for question generation
+_COMPLEXITY_WEIGHTS = {
+    1: 1.0,
+    2: 2.0,
+    3: 3.0,
+    4: 3.0,
+    5: 2.5,
+    6: 2.0,
+    7: 1.5,
+    8: 1.0,
+    9: 0.5,
+    10: 0.3,
+}
+
+
+def _weighted_choice(rng: random.Random, items: list, weights: dict):
+    """Pick an item proportional to its weight."""
+    w_list = [weights.get(item, 1.0) for item in items]
+    total = sum(w_list)
+    if total == 0:
+        return rng.choice(items)
+    r = rng.random() * total
+    cumulative = 0.0
+    for item, w in zip(items, w_list):
+        cumulative += w
+        if r <= cumulative:
+            return item
+    return items[-1]
+
+
+def gen_object_pred(
+    budget: int, rng: random.Random, sd: SceneData
+) -> Tuple[List[Predicate], int]:
+    """Generate object predicates (attrs/affs/label/superlatives/or/not) from a budget.
+
+    Returns (predicate_list, actual_cost).  The predicates are ANDed at the top level.
+    """
+    preds: List[Predicate] = []
+    remaining = budget
+
+    # Step 1: optionally include a label
+    include_label = False
+    if remaining >= 1 and sd.labels:
+        if remaining == 1 and not sd.attrs and not sd.affordances:
+            include_label = True
+        elif remaining >= 2 and rng.random() < 0.7:
+            include_label = True
+
+    if include_label:
+        preds.append(HasLabel(rng.choice(sd.labels)))
+        remaining -= 1
+
+    if remaining <= 0:
+        if not preds and sd.labels:
+            return [HasLabel(rng.choice(sd.labels))], 1
+        return preds, budget - remaining
+
+    # Step 2: spend remaining budget on clauses
+    max_clauses = 5
+    retries = 0
+    used_attr_vals: Set[str] = set()  # track to avoid duplicates
+    used_aff_vals: Set[str] = set()
+    while remaining > 0 and len(preds) < max_clauses and retries < 20:
+        moves = []
+        if remaining >= 1 and sd.attrs:
+            moves.append("attr")
+            moves.append("not_attr")
+        if remaining >= 1 and sd.affordances:
+            moves.append("aff")
+            moves.append("not_aff")
+        if remaining >= 2 and sd.comp_rels_in_scene:
+            moves.append("superlative")
+        if remaining >= 2 and len(sd.attrs) >= 2:
+            moves.append("or_attr")
+        if remaining >= 2 and len(sd.affordances) >= 2:
+            moves.append("or_aff")
+
+        if not moves:
+            break
+
+        move = _weighted_choice(rng, moves, _OBJ_MOVE_WEIGHTS)
+
+        if move == "attr":
+            v, cat = rng.choice(sd.attrs)
+            if v in used_attr_vals:
+                retries += 1
+                continue
+            used_attr_vals.add(v)
+            preds.append(HasAttribute(v, cat))
+            remaining -= 1
+        elif move == "not_attr":
+            v, cat = rng.choice(sd.attrs)
+            if v in used_attr_vals:
+                retries += 1
+                continue
+            used_attr_vals.add(v)
+            preds.append(NotPredicate(HasAttribute(v, cat)))
+            remaining -= 1
+        elif move == "aff":
+            aff = rng.choice(sd.affordances)
+            if aff in used_aff_vals:
+                retries += 1
+                continue
+            used_aff_vals.add(aff)
+            preds.append(HasAffordance(aff))
+            remaining -= 1
+        elif move == "not_aff":
+            aff = rng.choice(sd.affordances)
+            if aff in used_aff_vals:
+                retries += 1
+                continue
+            used_aff_vals.add(aff)
+            preds.append(NotPredicate(HasAffordance(aff)))
+            remaining -= 1
+        elif move == "superlative":
+            preds.append(IsSuperlative(rng.choice(sd.comp_rels_in_scene)))
+            remaining -= 2
+        elif move == "or_attr":
+            a1 = rng.choice(sd.attrs)
+            a2 = rng.choice(sd.attrs)
+            if a1 == a2 or a1[0] in used_attr_vals or a2[0] in used_attr_vals:
+                retries += 1
+                continue
+            used_attr_vals.add(a1[0])
+            used_attr_vals.add(a2[0])
+            preds.append(
+                OrPredicate(HasAttribute(a1[0], a1[1]), HasAttribute(a2[0], a2[1]))
+            )
+            remaining -= 2
+        elif move == "or_aff":
+            a1, a2 = rng.sample(sd.affordances, 2)
+            if a1 in used_aff_vals or a2 in used_aff_vals:
+                retries += 1
+                continue
+            used_aff_vals.add(a1)
+            used_aff_vals.add(a2)
+            preds.append(OrPredicate(HasAffordance(a1), HasAffordance(a2)))
+            remaining -= 2
+
+        retries = 0  # reset on success
+
+    if not preds:
+        if sd.labels:
+            return [HasLabel(rng.choice(sd.labels))], 1
+        return [], 0
+
+    return preds, budget - remaining
+
+
+def _get_rel_pool(rel_type: str, sd: SceneData) -> List[Tuple[str, str]]:
+    """Return the relationship pool for a given rel_type."""
+    if rel_type == "spatial":
+        return sd.spatial_rels
+    elif rel_type == "support":
+        return sd.support_rels
+    else:
+        return sd.spatial_rels + sd.support_rels
+
+
+def gen_rel_pred(
+    budget: int, rel_type: str, rng: random.Random, sd: SceneData, _depth: int = 0
+) -> Tuple[Predicate, int] | None:
+    """Generate a relationship predicate from a budget.
+
+    rel_type is "spatial", "support", or "any".
+    Returns (predicate, actual_cost) or None.
+    """
+    if budget < 2:
+        return None
+
+    rel_pool = _get_rel_pool(rel_type, sd)
+    if not rel_pool:
+        return None
+
+    # Build available forms
+    forms = ["simple"]
+    if budget >= 3 and _depth < 2:
+        forms.append("chained")
+    if budget >= 2 and sd.between_pairs and rel_type in ("spatial", "any"):
+        forms.append("between")
+
+    form = _weighted_choice(rng, forms, _REL_FORM_WEIGHTS)
+
+    if form == "simple":
+        rname, tgt_label = rng.choice(rel_pool)
+        # Budget: 1 for the relationship + 1 for the target label = 2 minimum
+        target_attr_budget = budget - 2
+        target_attrs = []
+        if target_attr_budget > 0 and sd.attrs:
+            available = [v for v, _ in sd.attrs]
+            count = min(target_attr_budget, 2, len(available))
+            if count > 0:
+                target_attrs = rng.sample(available, count)
+        actual = 2 + len(target_attrs)
+        return HasRelationTo(rname, tgt_label, target_attrs or None), actual
+
+    elif form == "chained":
+        rname, mid_label = rng.choice(rel_pool)
+        # The outer hop costs 1.  The inner relationship gets the remaining budget.
+        inner_budget = budget - 1
+        inner = gen_rel_pred(inner_budget, rel_type, rng, sd, _depth + 1)
+        if inner is None:
+            # Fallback to simple
+            return HasRelationTo(rname, mid_label), 2
+        inner_pred, inner_cost = inner
+        pred = HasRelationToChained(rname, mid_label, inner_pred)
+        return pred, 1 + inner_cost
+
+    elif form == "between":
+        la, lb = rng.choice(sd.between_pairs)
+        return IsBetween(la, lb), 2
+
+    return None
+
+
+def gen_preds(
+    question_type: str,
+    complexity: int,
+    rng: random.Random,
+    sd: SceneData,
+) -> List[Predicate] | None:
+    """Generate a predicate list for a question of the given type and complexity.
+
+    Returns a flat list of predicates (ANDed) or None on failure.
+    """
+    budget = complexity
+
+    # Step 1: determine number of relationship predicates
+    if question_type == "semantic":
+        num_rels = 0
+    else:
+        max_rels = max(1, (budget - 1) // 2)
+        max_rels = min(max_rels, 3)
+        if budget <= 3:
+            num_rels = 1
+        elif budget <= 5:
+            num_rels = _weighted_choice(rng, [1, 2], {1: 3, 2: 1})
+        else:
+            possible = [n for n in [1, 2, 3] if n * 2 + 1 <= budget and n <= max_rels]
+            if not possible:
+                possible = [1]
+            num_rels = _weighted_choice(rng, possible, {1: 3, 2: 2, 3: 1})
+
+    # Step 2: budget allocation
+    min_rel_total = num_rels * 2
+    min_obj = 1 if budget > min_rel_total else 0
+
+    if min_rel_total + min_obj > budget:
+        num_rels = max(0, (budget - 1) // 2)
+        min_rel_total = num_rels * 2
+        min_obj = max(0, budget - min_rel_total)
+        if num_rels == 0 and question_type != "semantic":
+            return None
+
+    obj_budget = min_obj
+    rel_budgets = [2] * num_rels
+    slack = budget - min_obj - min_rel_total
+
+    for _ in range(slack):
+        targets = ["obj"] + list(range(num_rels))
+        choice = rng.choice(targets)
+        if choice == "obj":
+            obj_budget += 1
+        else:
+            rel_budgets[choice] += 1
+
+    # Step 3: determine rel types
+    if question_type == "spatial":
+        rel_types = ["spatial"] * num_rels
+    elif question_type == "support":
+        rel_types = ["support"] * num_rels
+    elif question_type == "compound":
+        rel_types = [rng.choice(["spatial", "support", "any"]) for _ in range(num_rels)]
+    else:
+        rel_types = []
+
+    # Step 4: generate object predicate
+    obj_preds, _ = gen_object_pred(obj_budget, rng, sd)
+
+    # Step 5: generate relationship predicates (deduplicate by text)
+    rel_preds = []
+    rel_texts_seen: Set[str] = set()
+    for i in range(num_rels):
+        result = gen_rel_pred(rel_budgets[i], rel_types[i], rng, sd)
+        if result is not None:
+            pred, _ = result
+            text = pred.to_text()
+            if text not in rel_texts_seen:
+                rel_texts_seen.add(text)
+                rel_preds.append(pred)
+
+    if question_type != "semantic" and not rel_preds:
+        return None
+
+    all_preds = obj_preds + rel_preds
+    return all_preds if all_preds else None
+
+
+# ---------------------------------------------------------------------------
+# Question rendering
+# ---------------------------------------------------------------------------
+
+
+def _is_attr_like(p: Predicate) -> bool:
+    if isinstance(p, (HasAttribute, IsSuperlative)):
+        return True
+    if isinstance(p, NotPredicate) and isinstance(
+        p.inner, (HasAttribute, IsSuperlative)
+    ):
+        return True
+    if isinstance(p, OrPredicate):
+        return _is_attr_like(p.a) and _is_attr_like(p.b)
+    return False
+
+
+def _is_aff_like(p: Predicate) -> bool:
+    if isinstance(p, HasAffordance):
+        return True
+    if isinstance(p, NotPredicate) and isinstance(p.inner, HasAffordance):
+        return True
+    if isinstance(p, OrPredicate):
+        return _is_aff_like(p.a) and _is_aff_like(p.b)
+    return False
+
+
+def _render_attr_clause(p: Predicate) -> str:
+    """Render an attribute-like predicate as an adjective phrase."""
+    if isinstance(p, HasAttribute):
+        return p.attr_value
+    if isinstance(p, IsSuperlative):
+        return f"the {p.superlative}"
+    if isinstance(p, NotPredicate):
+        return f"not {_render_attr_clause(p.inner)}"
+    if isinstance(p, OrPredicate):
+        return f"{_render_attr_clause(p.a)} or {_render_attr_clause(p.b)}"
+    return p.to_text()
+
+
+def _render_aff_clause(p: Predicate) -> str:
+    """Render an affordance-like predicate as bare affordance text."""
+    if isinstance(p, HasAffordance):
+        return p.affordance
+    if isinstance(p, NotPredicate) and isinstance(p.inner, HasAffordance):
+        return f"not {p.inner.affordance}"
+    if isinstance(p, OrPredicate):
+        return f"{_render_aff_clause(p.a)} or {_render_aff_clause(p.b)}"
+    return p.to_text()
+
+
+def _join_and(parts: List[str]) -> str:
+    if len(parts) == 1:
+        return parts[0]
+    if len(parts) == 2:
+        return f"{parts[0]} and {parts[1]}"
+    return ", ".join(parts[:-1]) + ", and " + parts[-1]
+
+
+def render_question(
+    predicates: List[Predicate], num_answers: int, rng: random.Random
+) -> str:
+    """Linearize a predicate list into a grammatically correct English question.
+
+    Object predicates (attrs/affs/label/superlatives) render as adjectives before
+    the noun and an optional "which can be used for ..." clause.  Relationship
+    predicates render after the noun joined with "and".
+    """
+    label_pred = None
+    attr_preds: List[Predicate] = []
+    aff_preds: List[Predicate] = []
+    rel_preds: List[Predicate] = []
+
+    for p in predicates:
+        if isinstance(p, HasLabel):
+            label_pred = p
+        elif _is_attr_like(p):
+            attr_preds.append(p)
+        elif _is_aff_like(p):
+            aff_preds.append(p)
+        else:
+            rel_preds.append(p)
+
+    # Render each group
+    attr_texts = [_render_attr_clause(p) for p in attr_preds]
+    aff_texts = [_render_aff_clause(p) for p in aff_preds]
+    rel_texts = [p.to_text() for p in rel_preds]
+
+    use_plural = num_answers > 1 and rng.random() < 0.4
+    verb = "are" if use_plural else "is"
+    interrogative = rng.choice(["Which", "Which", "What"])
+
+    # Build the noun
+    if label_pred:
+        noun = _pluralize(label_pred.label) if use_plural else label_pred.label
+    else:
+        noun = "objects" if use_plural else "object"
+
+    # Build the question in three zones:
+    #   1. attr zone  – adjectives that go after "is/are": "red, tall or wide, not old"
+    #   2. aff zone   – "used for X and Y but not Z"  (joined with the attr zone via "and")
+    #   3. rel zone   – relationship clauses: "to the right of the table"
+    # The aff zone never starts with "which can be used for" — that phrasing is only
+    # used when the affordance follows a noun ("chair which can be used for sitting").
+    # After "is/are" we use the bare form: "used for sitting".
+
+    # Combine attrs + affs into a single "property" description
+    prop_parts: List[str] = []
+    if attr_texts:
+        prop_parts.append(", ".join(attr_texts))
+    for at in aff_texts:
+        prop_parts.append(f"used for {at}")
+
+    # Combine all descriptor parts (properties + relationships)
+    desc_parts: List[str] = []
+    if prop_parts:
+        desc_parts.append(_join_and(prop_parts))
+    if rel_texts:
+        desc_parts.extend(rel_texts)
+
+    if desc_parts:
+        desc = _join_and(desc_parts)
+        if label_pred:
+            return f"{interrogative} {noun} {verb} {desc}?"
+        else:
+            if interrogative == "What" and not use_plural and rng.random() < 0.5:
+                return f"{interrogative} {verb} {desc}?"
+            return f"{interrogative} {noun} {verb} {desc}?"
+    elif label_pred:
+        if interrogative == "What" and not use_plural and rng.random() < 0.5:
+            return f"{interrogative} {verb} {get_article(label_pred.label)} {label_pred.label}?"
+        return f"{interrogative} {noun} {verb} {get_article(label_pred.label)} {label_pred.label}?"
+    else:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Question assembly
+# ---------------------------------------------------------------------------
+
+
+def try_make_question(
+    predicates: List[Predicate],
+    sd: SceneData,
+    rng: random.Random,
+) -> Dict | None:
+    answers = evaluate_predicates(predicates, sd.obj_by_id, sd.outgoing, sd.incoming)
+    if MIN_ANSWERS <= len(answers) <= MAX_ANSWERS:
+        for p in predicates:
+            p.resolve_references(sd.obj_by_id, rng)
+        q_text = render_question(predicates, len(answers), rng)
+        if q_text is None:
+            return None
+        return {
+            "question": q_text,
+            "answerObjectIds": sorted(answers),
+            "type": question_type(predicates),
+        }
+    return None
+
+
+def _type_has_data(qtype: str, sd: SceneData) -> bool:
+    if qtype == "semantic":
+        return bool(sd.attrs or sd.labels or sd.affordances)
+    if qtype == "spatial":
+        return bool(sd.spatial_rels)
+    if qtype == "support":
+        return bool(sd.support_rels)
+    if qtype == "compound":
+        return bool(sd.spatial_rels or sd.support_rels)
+    return False
+
+
+def generate_questions_for_scene(sg: Dict, rng: random.Random) -> List[Dict]:
+    sd = build_scene_data(sg)
+    if sd is None:
+        return []
+
+    available_types = [
+        t
+        for t in ("semantic", "spatial", "support", "compound")
+        if _type_has_data(t, sd)
+    ]
+    if not available_types:
+        return []
+
+    _base_type_weights = {
+        "semantic": 1.0,
+        "spatial": 2.0,
+        "support": 2.0,
+        "compound": 1.0,
+    }
+    type_weights = {t: _base_type_weights[t] for t in available_types}
+
+    results: List[Dict] = []
+    seen: Set[str] = set()
+    attempts = 0
+    max_attempts = MAX_QUESTIONS_PER_SCENE * MAX_ATTEMPTS_PER_QUESTION
+
+    while len(results) < MAX_QUESTIONS_PER_SCENE and attempts < max_attempts:
+        attempts += 1
+
+        qtype = _weighted_choice(rng, available_types, type_weights)
+        max_c = 5 if qtype == "semantic" else 10
+        valid_cs = [c for c in _COMPLEXITY_WEIGHTS if c <= max_c]
+        complexity = _weighted_choice(
+            rng, valid_cs, {c: _COMPLEXITY_WEIGHTS[c] for c in valid_cs}
+        )
+
+        preds = gen_preds(qtype, complexity, rng, sd)
+        if preds is None:
+            continue
+
+        q = try_make_question(preds, sd, rng)
+        if q and q["question"] not in seen:
+            seen.add(q["question"])
+            results.append(q)
+
+    rng.shuffle(results)
+    return results[:MAX_QUESTIONS_PER_SCENE]
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 
 def main():

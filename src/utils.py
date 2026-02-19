@@ -59,6 +59,22 @@ def save_completion_prompt(messages, fp):
         fp.write(message["content"] + "\n")
 
 
+def save_prompt_files(messages, output_dir):
+    """Save messages to separate files: system.txt for the system prompt,
+    messages.txt for the remaining chat messages."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    system_messages = [m for m in messages if m["role"] == "system"]
+    other_messages = [m for m in messages if m["role"] != "system"]
+
+    with open(output_dir / "system.txt", "w") as fp:
+        save_completion_prompt(system_messages, fp)
+
+    with open(output_dir / "messages.txt", "w") as fp:
+        save_completion_prompt(other_messages, fp)
+
+
 def lock_file(path):
     lockpath = Path(f"{path}.lock")
     wait_time = 0.0001

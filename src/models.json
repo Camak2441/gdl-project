@@ -1,8 +1,16 @@
 {
     "gpt-oss:20b": {
         "source": "ollama",
-        "fixedTemp": false,
-        "reasoning": true,
+        "hasTemperature": true,
+        "hasReasoning": true,
+        "hasVerbosity": false,
         "maxOutputTokens": 131072
+    },
+    "gpt-5-mini": {
+        "source": "openai",
+        "hasTemperature": true,
+        "hasReasoning": true,
+        "hasVerbosity": true,
+        "maxOutputTokens": 400000
     }
 }

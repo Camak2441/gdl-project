@@ -512,9 +512,9 @@ def _generate_json_schema_from_tuple(schema):
                 )
             return _json_any
         case "dict":
-            if len(schema) != 1:
+            if len(schema) != 2:
                 raise invalid_schema_error(
-                    f"Schema dict tuple expected 1 argument, received {len(schema)}",
+                    f"Schema dict tuple expected 2 arguments, received {len(schema)}",
                     schema,
                 )
             return _JSONDict(generate_json_schema(schema[1]))

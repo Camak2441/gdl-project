@@ -20,6 +20,7 @@ Q_TYPES = {
     "spatial": 1,
     "support": 2,
     "compound": 3,
+    "complex": 4,
 }
 
 
