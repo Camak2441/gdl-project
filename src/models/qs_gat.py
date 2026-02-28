@@ -2,10 +2,18 @@ from typing import List
 
 import torch
 import torch_geometric
-from layers import QueryGATConv
+from layers import IntraQueryGATConv
 
 
-class QueryGat(torch.nn.Module):
+class QsGat(torch.nn.Module):
+    """
+    :param in_dim: Input node feature dimension.
+    :param query_dim: Query embedding dimension.
+    :param hidden_dims: List of per-head hidden dimensions for intermediate layers.
+    :param out_dim: Output dimension (typically 1 for node scoring).
+    :param edge_dim: Edge feature dimension.
+    :param heads: Number of attention heads.
+    """
 
     def __init__(
         self,
@@ -22,42 +30,23 @@ class QueryGat(torch.nn.Module):
         self.in_channels = in_dim
         self.hidden_channels = hidden_dims
         self.out_channels = out_dim
-        layers = []
 
         l_in_dims = [in_dim] + hidden_dims
         l_out_dims = hidden_dims + [out_dim]
+        layers = []
 
         for i in range(len(l_in_dims)):
-            if i == 0:
-                layers.append(
-                    QueryGATConv(
-                        in_dim=l_in_dims[i],
-                        query_dim=query_dim,
-                        out_dim=l_out_dims[i],
-                        edge_dim=edge_dim,
-                        heads=heads,
-                    )
+            is_last = i + 1 == len(l_in_dims)
+            layers.append(
+                IntraQueryGATConv(
+                    in_dim=l_in_dims[i] if i == 0 else l_in_dims[i] * heads,
+                    edge_dim=edge_dim,
+                    query_dim=query_dim,
+                    out_dim=l_out_dims[i],
+                    heads=1 if is_last else heads,
+                    concat=not is_last,
                 )
-            elif i + 1 < len(l_in_dims):
-                layers.append(
-                    QueryGATConv(
-                        in_dim=l_in_dims[i] * heads,
-                        query_dim=query_dim,
-                        out_dim=l_out_dims[i],
-                        edge_dim=edge_dim,
-                        heads=heads,
-                    )
-                )
-            else:
-                layers.append(
-                    QueryGATConv(
-                        in_dim=l_in_dims[i] * heads,
-                        query_dim=query_dim,
-                        out_dim=l_out_dims[i],
-                        edge_dim=edge_dim,
-                        heads=1,
-                    )
-                )
+            )
 
         self.layers = torch.nn.ModuleList(layers)
         self.multi = multi
@@ -66,7 +55,7 @@ class QueryGat(torch.nn.Module):
         self.relu = torch.nn.ReLU()
 
     def forward(self, x, edge_index, edge_attr, query, batch):
-        for id, layer in enumerate(self.layers):
+        for i, layer in enumerate(self.layers):
             x = layer(
                 x=x,
                 edge_index=edge_index,
@@ -74,7 +63,7 @@ class QueryGat(torch.nn.Module):
                 query=query,
                 batch=batch,
             )
-            if id + 1 == len(self.layers):
+            if i + 1 == len(self.layers):
                 if self.multi:
                     x = self.sigmoid(x).squeeze(-1)
                 else:

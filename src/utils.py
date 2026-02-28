@@ -110,7 +110,7 @@ def multi_get(d, indices, default=None):
 
 def quote_json_val(s):
     val = s.strip()
-    if re.match(r"0|[1-9][0-9]*|(0|[1-9][0-9]*)\.[0-9]*|true|false", val):
+    if re.fullmatch(r"0|[1-9][0-9]*|(0|[1-9][0-9]*)\.[0-9]*|true|false", val):
         return val
     if val.startswith('"') and val.endswith('"'):
         return val
@@ -142,73 +142,111 @@ def quote_json(s):
     while index < len(s):
         c = s[index]
         index += 1
-        match c:
-            case "{":
-                seg_s = get_seg()
-                assert seg_s.strip() == "", f"Unexpected value before {index} in {s}"
-                segs.append("{")
-                bracket_stack.append("{")
-            case "}":
-                seg_s = get_seg()
-                assert len(bracket_stack) > 0, f"Unmatched bracket at {index} in {s}"
-                if bracket_stack[-1] == ":":
-                    quoted = quote_json_val(seg_s)
-                    assert quoted is not None, f"Missing value before {index} in {s}"
-                    segs.append(quoted + "}")
-                    bracket_stack.pop()
-                else:
+        if len(bracket_stack) > 0 and bracket_stack[-1] == '"':
+            seg.append(c)
+            match c:
+                case '"':
+                    if not (
+                        len(seg) > 0
+                        and seg[-1] == "\\"
+                        and (len(seg) < 2 or seg[-2] != "\\")
+                    ):
+                        bracket_stack.pop()
+                        seg_s = get_seg()
+                        segs.append(seg_s)
+        else:
+            match c:
+                case '"':
+                    seg_s = get_seg()
+                    segs.append(seg_s)
+                    seg.append('"')
+                    bracket_stack.append('"')
+                case "{":
+                    seg_s = get_seg()
                     assert (
                         seg_s.strip() == ""
                     ), f"Unexpected value before {index} in {s}"
-                assert bracket_stack[-1] == "{", f"Unmatched bracket at {index} in {s}"
-                bracket_stack.pop()
-            case "[":
-                seg_s = get_seg()
-                assert seg_s.strip() == "", f"Unexpected value before {index} in {s}"
-                segs.append("[")
-                bracket_stack.append("[")
-            case "]":
-                seg_s = get_seg()
-                assert len(bracket_stack) > 0, f"Unmatched bracket at {index} in {s}"
-                if bracket_stack[-1] == ",":
+                    segs.append("{")
+                    bracket_stack.append("{")
+                case "}":
+                    seg_s = get_seg()
+                    assert (
+                        len(bracket_stack) > 0
+                    ), f"Unmatched bracket at {index} in {s}"
+                    if bracket_stack[-1] == ":":
+                        quoted = quote_json_val(seg_s)
+                        assert (
+                            quoted is not None
+                        ), f"Missing value before {index} in {s}"
+                        segs.append(quoted + "}")
+                        bracket_stack.pop()
+                    else:
+                        assert (
+                            seg_s.strip() == ""
+                        ), f"Unexpected value before {index} in {s}"
+                    assert (
+                        bracket_stack[-1] == "{"
+                    ), f"Unmatched bracket at {index} in {s}"
+                    bracket_stack.pop()
+                case "[":
+                    seg_s = get_seg()
+                    assert (
+                        seg_s.strip() == ""
+                    ), f"Unexpected value before {index} in {s}"
+                    segs.append("[")
+                    bracket_stack.append("[")
+                case "]":
+                    seg_s = get_seg()
+                    assert (
+                        len(bracket_stack) > 0
+                    ), f"Unmatched bracket at {index} in {s}"
+                    if bracket_stack[-1] == ",":
+                        quoted = quote_json_val(seg_s)
+                        assert (
+                            quoted is not None
+                        ), f"Missing value before {index} in {s}"
+                        segs.append(quoted + "]")
+                        bracket_stack.pop()
+                    else:
+                        quoted = quote_json_val(seg_s)
+                        if quoted is not None:
+                            segs.append(quoted + "]")
+
+                    assert (
+                        bracket_stack[-1] == "["
+                    ), f"Unmatched bracket at {index} in {s}"
+                    bracket_stack.pop()
+                case ":":
+                    seg_s = get_seg()
+                    quoted = quote_json_key(seg_s)
+                    assert quoted is not None, f"Missing value before {index} in {s}"
+                    assert len(bracket_stack) > 0, f"Unmatched colon at {index} in {s}"
+                    segs.append(quoted + ":")
+                    if bracket_stack[-1] == ",":
+                        bracket_stack.pop()
+                    assert (
+                        bracket_stack[-1] in "{"
+                    ), f"Unmatched colon at {index} in {s}"
+                    bracket_stack.append(":")
+                case ",":
+                    seg_s = get_seg()
                     quoted = quote_json_val(seg_s)
                     assert quoted is not None, f"Missing value before {index} in {s}"
-                    segs.append(quoted + "]")
-                    bracket_stack.pop()
-                else:
-                    quoted = quote_json_val(seg_s)
-                    if quoted is not None:
-                        segs.append(quoted + "]")
-
-                assert bracket_stack[-1] == "[", f"Unmatched bracket at {index} in {s}"
-                bracket_stack.pop()
-            case ":":
-                seg_s = get_seg()
-                quoted = quote_json_key(seg_s)
-                assert quoted is not None, f"Missing value before {index} in {s}"
-                assert len(bracket_stack) > 0, f"Unmatched colon at {index} in {s}"
-                segs.append(quoted + ":")
-                if bracket_stack[-1] == ",":
-                    bracket_stack.pop()
-                assert bracket_stack[-1] in "{", f"Unmatched colon at {index} in {s}"
-                bracket_stack.append(":")
-            case ",":
-                seg_s = get_seg()
-                quoted = quote_json_val(seg_s)
-                assert quoted is not None, f"Missing value before {index} in {s}"
-                segs.append(quoted + ",")
-                assert len(bracket_stack) > 0, f"Unexpected comma at {index} in {s}"
-                assert bracket_stack[-1] in "[:,", f"Unexpected comma at {index} in {s}"
-                if bracket_stack[-1] == ":":
-                    bracket_stack.pop()
-                if bracket_stack[-1] == ",":
-                    bracket_stack.pop()
+                    segs.append(quoted + ",")
+                    assert len(bracket_stack) > 0, f"Unexpected comma at {index} in {s}"
                     assert (
-                        bracket_stack[-1] in "["
+                        bracket_stack[-1] in "[:,"
                     ), f"Unexpected comma at {index} in {s}"
-                bracket_stack.append(",")
-            case _:
-                seg.append(c)
+                    if bracket_stack[-1] == ":":
+                        bracket_stack.pop()
+                    if bracket_stack[-1] == ",":
+                        bracket_stack.pop()
+                        assert (
+                            bracket_stack[-1] in "["
+                        ), f"Unexpected comma at {index} in {s}"
+                    bracket_stack.append(",")
+                case _:
+                    seg.append(c)
 
     seg_s = get_seg()
     if len(segs) != 0:

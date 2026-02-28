@@ -27,14 +27,12 @@ class QueryGATv2Conv(torch.nn.Module):
 
     def forward(self, x, edge_index, edge_attr, query, batch):
         """
-        Docstring for forward
-
-        :param self: Description
-        :param x: node features in shape [num_nodes, num_node_features]
-        :param edge_index: Description
-        :param edge_attr: Description
-        :param query: Description
-        :param batch: batch indices in shape [num_nodes]
+        :param x: Node features [num_nodes, in_dim]
+        :param edge_index: Edge index [2, num_edges]
+        :param edge_attr: Edge features [num_edge, edge_dim]
+        :param query: Query [num graphs, query_dim]
+        :param batch: Batch indices [num_nodes]
+        :returns: Updated node features [num_nodes, out_dim].
         """
         x = torch.cat(
             [

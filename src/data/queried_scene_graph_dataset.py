@@ -11,7 +11,6 @@ class QueriedSceneGraphDataset(Dataset):
         self.questions_dir = Path(root) / "questions"
 
         questions_files = sorted(self.questions_dir.glob("*.pth"))
-        self.questions = []
         queries = []
         ys = {}
         qtypes = []
@@ -41,7 +40,7 @@ class QueriedSceneGraphDataset(Dataset):
         }
 
     def __len__(self):
-        return len(self.questions)
+        return self.queries.shape[0]
 
     def __getitem__(self, idx):
         scan_id = self.scan_ids[idx]

@@ -2,19 +2,19 @@ from typing import List
 
 import torch
 import torch_geometric
-from layers import QueryGATConv
+
+from layers.query_message_passing import QueryMessagePassing
 
 
-class QueryGat(torch.nn.Module):
+class QueryMpn(torch.nn.Module):
 
     def __init__(
         self,
         in_dim: int,
-        query_dim: int,
         edge_dim: int,
+        query_dim: int,
         hidden_dims: List[int],
         out_dim: int,
-        heads: int = 1,
         multi: bool = False,
     ):
         super().__init__()
@@ -28,38 +28,17 @@ class QueryGat(torch.nn.Module):
         l_out_dims = hidden_dims + [out_dim]
 
         for i in range(len(l_in_dims)):
-            if i == 0:
-                layers.append(
-                    QueryGATConv(
-                        in_dim=l_in_dims[i],
-                        query_dim=query_dim,
-                        out_dim=l_out_dims[i],
-                        edge_dim=edge_dim,
-                        heads=heads,
-                    )
+            layers.append(
+                QueryMessagePassing(
+                    in_dim=l_in_dims[i],
+                    edge_dim=edge_dim,
+                    query_dim=query_dim,
+                    out_dim=l_out_dims[i],
                 )
-            elif i + 1 < len(l_in_dims):
-                layers.append(
-                    QueryGATConv(
-                        in_dim=l_in_dims[i] * heads,
-                        query_dim=query_dim,
-                        out_dim=l_out_dims[i],
-                        edge_dim=edge_dim,
-                        heads=heads,
-                    )
-                )
-            else:
-                layers.append(
-                    QueryGATConv(
-                        in_dim=l_in_dims[i] * heads,
-                        query_dim=query_dim,
-                        out_dim=l_out_dims[i],
-                        edge_dim=edge_dim,
-                        heads=1,
-                    )
-                )
+            )
 
         self.layers = torch.nn.ModuleList(layers)
+
         self.multi = multi
         if multi:
             self.sigmoid = torch.nn.Sigmoid()
@@ -71,8 +50,7 @@ class QueryGat(torch.nn.Module):
                 x=x,
                 edge_index=edge_index,
                 edge_attr=edge_attr,
-                query=query,
-                batch=batch,
+                query=query[batch],
             )
             if id + 1 == len(self.layers):
                 if self.multi:

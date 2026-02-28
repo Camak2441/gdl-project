@@ -12,5 +12,12 @@
         "hasReasoning": true,
         "hasVerbosity": true,
         "maxOutputTokens": 400000
+    },
+    "gpt-4.1-nano": {
+        "source": "openai",
+        "hasTemperature": true,
+        "hasReasoning": false,
+        "hasVerbosity": false,
+        "maxOutputTokens": 32768
     }
 }

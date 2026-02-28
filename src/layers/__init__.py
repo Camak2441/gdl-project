@@ -1,2 +1,5 @@
 from layers.query_gat_conv import QueryGATConv
 from layers.query_gatv2_conv import QueryGATv2Conv
+from layers.add_query_virtual_node import AddQueryVirtualNode
+from layers.intra_query_gat_conv import IntraQueryGATConv
+from layers.inter_query_conv import InterQueryConv

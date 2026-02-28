@@ -1,12 +1,23 @@
+from typing import List
+
 import torch
 import torch_geometric
 from torch_geometric.nn.conv import GATConv
 from layers import QueryGATConv
 
 
-class QueryInGAT(torch.nn.Module):
+class QueryInGat(torch.nn.Module):
 
-    def __init__(self, in_dim, query_dim, hidden_dims, out_dim, edge_dim, heads=1):
+    def __init__(
+        self,
+        in_dim: int,
+        query_dim: int,
+        edge_dim: int,
+        hidden_dims: List[int],
+        out_dim: int,
+        heads: int = 1,
+        multi: bool = False,
+    ):
         super().__init__()
 
         self.in_channels = in_dim
@@ -49,6 +60,9 @@ class QueryInGAT(torch.nn.Module):
 
         self.layers = torch.nn.ModuleList(layers)
 
+        self.multi = multi
+        if multi:
+            self.sigmoid = torch.nn.Sigmoid()
         self.relu = torch.nn.ReLU()
 
     def forward(self, x, edge_index, edge_attr, query, batch):
@@ -59,7 +73,15 @@ class QueryInGAT(torch.nn.Module):
             query=query,
             batch=batch,
         )
-        x = self.relu(x)
+
+        if len(self.layers) == 1:
+            if self.multi:
+                x = self.sigmoid(x).squeeze(-1)
+            else:
+                x = torch_geometric.utils.softmax(x.squeeze(-1), batch)
+        else:
+            x = self.relu(x)
+
         for id, layer in enumerate(self.layers[1:]):
             x = layer(
                 x=x,
@@ -67,7 +89,10 @@ class QueryInGAT(torch.nn.Module):
                 edge_attr=edge_attr,
             )
             if id + 2 == len(self.layers):
-                x = torch_geometric.utils.softmax(x.squeeze(), batch)
+                if self.multi:
+                    x = self.sigmoid(x).squeeze(-1)
+                else:
+                    x = torch_geometric.utils.softmax(x.squeeze(-1), batch)
             else:
                 x = self.relu(x)
         return x
