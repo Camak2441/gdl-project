@@ -14,7 +14,9 @@ NODE_ENCODER = "all_minilm_l6v2"
 QUERY_ENCODER = "all_minilm_l6v2"
 
 DATASET_DIR = (
-    DATA_DIR / "dataset" / ";".join([EDGE_ENCODER, NODE_ENCODER, QUERY_ENCODER])
+    DATA_DIR
+    / "dataset_single_answer"
+    / ";".join([EDGE_ENCODER, NODE_ENCODER, QUERY_ENCODER])
 )
 TRAIN_DATASET_DIR = DATASET_DIR / "train"
 TEST_DATASET_DIR = DATASET_DIR / "test"
@@ -22,7 +24,7 @@ VAL_DATASET_DIR = DATASET_DIR / "val"
 EMBEDDED_SCENE_GRAPH_DIR = (
     DATA_DIR / "embedded_scene_graphs" / ";".join([EDGE_ENCODER, NODE_ENCODER])
 )
-QUESTIONS_DIR = DATA_DIR / "questions"
+QUESTIONS_DIR = DATA_DIR / "questions_single_answer"
 SCENE_GRAPH_DIR = DATA_DIR / "scene_graphs"
 
 # Split configuration
@@ -148,17 +150,20 @@ def save_questions_for_split(
         )
         question_datas["qtypes"].append(Q_TYPES[q["type"]])
 
+    scene_graph_questions = {
+        "question": question_datas["questions"],
+        "query": encode_query(question_datas["questions"]),
+        "y": torch.stack(question_datas["ys"]),
+        "qtype": torch.tensor(question_datas["qtypes"]),
+        "scanId": scan_id,
+    }
+
     torch.save(
-        {
-            "query": encode_query(question_datas["questions"]),
-            "y": torch.stack(question_datas["ys"]),
-            "qtype": torch.tensor(question_datas["qtypes"]),
-            "scanId": scan_id,
-        },
+        scene_graph_questions,
         questions_dir / (scan_id + ".pth"),
     )
 
-    return len(question_datas)
+    return len(question_datas["questions"])
 
 
 def main():

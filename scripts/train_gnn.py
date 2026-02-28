@@ -1,3 +1,7 @@
+import argparse
+from pathlib import Path
+import re
+
 from tqdm import trange
 import torch
 import numpy as np
@@ -6,10 +10,18 @@ from torch.utils.data import random_split
 from torch_geometric.loader import DataLoader
 
 from consts import DATA_DIR, OUTPUT_DIR
+from data import get_dataset
 from data.queried_scene_graph_dataset import QueriedSceneGraphDataset
+from losses import BatchLoss, RecallPrecisionWeightedLoss, WeightedLosses
 from stats import generate_training_stats, save_training_stats, update_epoch_stats
-from train.utils import EVAL_STATS, eval_model, train
-from models import canonical_model_name, load_model
+from train.utils import (
+    EVAL_MULTI_STATS,
+    EVAL_STATS,
+    eval_model,
+    eval_multi_model,
+    train,
+)
+from models import canonical_model_name, get_model_name, load_model
 
 
 MODEL_OUT_DIR = OUTPUT_DIR / "models"
@@ -21,21 +33,8 @@ NODE_ENCODER = "all_minilm_l6v2"
 QUERY_ENCODER = "all_minilm_l6v2"
 
 
-DATASET_DIR = (
-    DATA_DIR / "dataset" / ";".join([EDGE_ENCODER, NODE_ENCODER, QUERY_ENCODER])
-)
-
-
-MODEL_NAME = canonical_model_name(
-    f"MultiQueryInGat(\
-        e_enc={EDGE_ENCODER},\
-        n_enc={NODE_ENCODER},\
-        q_enc={QUERY_ENCODER},\
-        hidden_dims=[128,128,128,128],\
-        out_dim=1,\
-        heads=4\
-    )"
-)
+MULTI_ANSWER_DATASET = True
+MULTI_ANSWER_ARG = str(MULTI_ANSWER_DATASET).lower()
 
 
 EPOCHS = 1000
@@ -44,38 +43,70 @@ EPOCHS_FOR_ALL_DATA = 20
 
 CHECKPOINT_EPOCHS = set(range(0, 10000, 100))
 
+MIN_LR = 1e-6
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
+def _cleanup_old_checkpoints(model_name, final_epoch):
+    """Delete model/stats checkpoint files with epoch numbers > final_epoch."""
+    for base_dir, suffix in [(MODEL_OUT_DIR, ".pth"), (STATS_OUT_DIR, ".h5")]:
+        dir_ = base_dir / model_name
+        if not dir_.exists():
+            continue
+        for f in dir_.iterdir():
+            if f.suffix == suffix:
+                try:
+                    if int(f.stem) > final_epoch:
+                        f.unlink()
+                        print(f"Deleted stale checkpoint: {f}")
+                except ValueError:
+                    pass
+
+
 def run_experiment(
     model: torch.nn.Module,
+    model_name,
     train_set,
     val_set,
     test_set,
     n_epochs=100,
+    batch_size=256,
     epochs_for_all_data=20,
     device=DEVICE,
     checkpoint_epochs=set(),
+    multi: bool = False,
+    min_lr: float = MIN_LR,
 ):
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", factor=0.9, patience=5, min_lr=0.00001
+        optimizer, mode="min", factor=0.9, patience=5, min_lr=min_lr
     )
 
-    pbar = trange(n_epochs)
+    eval_fn = eval_multi_model if multi else eval_model
+    stat_keys = EVAL_MULTI_STATS if multi else EVAL_STATS
 
     training_stats = generate_training_stats(
         {
             "loss": "epoch",
-            **{"val_" + key: "epoch" for key in EVAL_STATS},
-            **{"test_" + key: "epoch" for key in EVAL_STATS},
+            **{"val_" + key: "epoch" for key in stat_keys},
         },
         n_epochs=n_epochs,
     )
 
-    criterion = torch.nn.L1Loss()
+    criterion = BatchLoss(
+        RecallPrecisionWeightedLoss(
+            loss=WeightedLosses(
+                [
+                    torch.nn.L1Loss(reduction="none"),
+                    torch.nn.MSELoss(reduction="none"),
+                ],
+                [0.8, 0.2],
+            ),
+        )
+    )
+    criterion.to(device)
 
     split = [1.0 / epochs_for_all_data] * (epochs_for_all_data - 1)
     split.append(1 - sum(split))
@@ -88,17 +119,14 @@ def run_experiment(
 
     val_loader = DataLoader(
         val_set,
-        batch_size=512,
-        num_workers=4,
-        pin_memory=True,
-    )
-    test_loader = DataLoader(
-        test_set,
-        batch_size=512,
+        batch_size=batch_size,
         num_workers=4,
         pin_memory=True,
     )
 
+    final_epoch = n_epochs
+
+    pbar = trange(n_epochs)
     for epoch in pbar:
         lr = scheduler.optimizer.param_groups[0]["lr"]
 
@@ -108,7 +136,7 @@ def run_experiment(
 
         epoch_loader = DataLoader(
             epoch_sets[cycle_pos],
-            batch_size=512,
+            batch_size=batch_size,
             num_workers=4,
             pin_memory=True,
         )
@@ -120,11 +148,8 @@ def run_experiment(
             criterion=criterion,
             device=device,
         )
-        val_stats = eval_model(
+        val_stats = eval_fn(
             model=model, dataset=val_loader, criterion=criterion, device=device
-        )
-        test_stats = eval_model(
-            model=model, dataset=test_loader, criterion=criterion, device=device
         )
 
         update_epoch_stats(
@@ -132,7 +157,6 @@ def run_experiment(
             epoch_stats={
                 "loss": loss,
                 **{"val_" + key: val_stats[key] for key in val_stats},
-                **{"test_" + key: test_stats[key] for key in test_stats},
             },
             epoch=epoch,
         )
@@ -140,65 +164,88 @@ def run_experiment(
         scheduler.step(val_stats["loss"])
         pbar.set_description(f"loss={loss:.4f}, lr={lr:.6f}")
 
-        if epoch in checkpoint_epochs:
-            this_model_dir = MODEL_OUT_DIR / MODEL_NAME
+        if epoch + 1 in checkpoint_epochs:
+            this_model_dir = MODEL_OUT_DIR / model_name
             this_model_dir.mkdir(exist_ok=True, parents=True)
-            torch.save(model.state_dict(), this_model_dir / (str(EPOCHS) + ".pth"))
+            torch.save(model.state_dict(), this_model_dir / (str(epoch + 1) + ".pth"))
 
-            this_model_stats_dir = STATS_OUT_DIR / MODEL_NAME
+            this_model_stats_dir = STATS_OUT_DIR / model_name
             this_model_stats_dir.mkdir(exist_ok=True, parents=True)
             save_training_stats(
-                training_stats, this_model_stats_dir / (str(EPOCHS) + ".h5")
+                training_stats, this_model_stats_dir / (str(epoch + 1) + ".h5")
             )
 
-    return training_stats
+        new_lr = scheduler.optimizer.param_groups[0]["lr"]
+        if new_lr <= min_lr:
+            final_epoch = epoch + 1
+            print(
+                f"\nEarly stopping: LR hit minimum ({min_lr:.2e}) at epoch {final_epoch}"
+            )
+            _cleanup_old_checkpoints(model_name, final_epoch)
+            break
 
-
-def plot_stats(training_stats, figsize=(5, 5), name=""):
-    """Create one plot for each metric stored in training_stats"""
-    stats_names = [key[6:] for key in training_stats.keys() if key.startswith("train_")]
-    _, ax = plt.subplots(len(stats_names), 1, figsize=figsize)
-    if len(stats_names) == 1:
-        ax = np.array([ax])
-    for key, axx in zip(
-        stats_names,
-        ax.reshape(
-            -1,
-        ),
-    ):
-        axx.plot(
-            training_stats["epoch"],
-            training_stats[f"train_{key}"],
-            label=f"Training {key}",
-        )
-        axx.plot(
-            training_stats["epoch"],
-            training_stats[f"val_{key}"],
-            label=f"Validation {key}",
-        )
-        axx.set_xlabel("Training epoch")
-        axx.set_ylabel(key)
-        axx.legend()
-    plt.title(name)
+    return training_stats, final_epoch
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Trains GNN on the dataset")
+    parser.add_argument(
+        "model",
+        type=str,
+        help="Model to train",
+    )
+    parser.add_argument(
+        "dataset",
+        type=str,
+        help="Dataset to train the model on",
+    )
+    parser.add_argument(
+        "--multi",
+        type=bool,
+        default=True,
+        help=f"Whether the dataset allows multiple answers per question or not",
+    )
+    parser.add_argument(
+        "--min-lr",
+        type=float,
+        default=MIN_LR,
+        help=f"Minimum learning rate; training stops when LR hits this value (default: {MIN_LR})",
+    )
+    args = parser.parse_args()
 
-    print("Loading datasets...")
+    dataset_dir, multi = get_dataset(
+        args.dataset,
+        node_encoder=NODE_ENCODER,
+        edge_encoder=EDGE_ENCODER,
+        query_encoder=QUERY_ENCODER,
+    )
+    if multi is None:
+        multi = args.multi
 
-    train_set = QueriedSceneGraphDataset(DATASET_DIR / "train")
-    val_set = QueriedSceneGraphDataset(DATASET_DIR / "val")
-    test_set = QueriedSceneGraphDataset(DATASET_DIR / "test")
+    print(f"Loading dataset {dataset_dir}...")
 
-    print(f"Loading model {MODEL_NAME}...")
+    train_set = QueriedSceneGraphDataset(dataset_dir / "train")
+    val_set = QueriedSceneGraphDataset(dataset_dir / "val")
+    test_set = QueriedSceneGraphDataset(dataset_dir / "test")
 
-    model = load_model(MODEL_NAME)
+    model_name = get_model_name(
+        args.model,
+        edge_encoder=EDGE_ENCODER,
+        node_encoder=NODE_ENCODER,
+        query_encoder=QUERY_ENCODER,
+        multi=multi,
+    )
+
+    print(f"Loading model {model_name}...")
+
+    model = load_model(model_name)
 
     print("Running on device", DEVICE)
 
     model.to(DEVICE)
-    training_stats = run_experiment(
+    training_stats, final_epoch = run_experiment(
         model,
+        model_name,
         train_set,
         val_set,
         test_set,
@@ -206,15 +253,19 @@ def main():
         epochs_for_all_data=EPOCHS_FOR_ALL_DATA,
         device=DEVICE,
         checkpoint_epochs=CHECKPOINT_EPOCHS,
+        multi=multi,
+        min_lr=args.min_lr,
     )
 
-    this_model_dir = MODEL_OUT_DIR / MODEL_NAME
+    this_model_dir = MODEL_OUT_DIR / model_name
     this_model_dir.mkdir(exist_ok=True, parents=True)
-    torch.save(model.state_dict(), this_model_dir / (str(EPOCHS) + ".pth"))
+    torch.save(model.state_dict(), this_model_dir / (str(final_epoch) + ".pth"))
 
-    this_model_stats_dir = STATS_OUT_DIR / MODEL_NAME
+    this_model_stats_dir = STATS_OUT_DIR / model_name
     this_model_stats_dir.mkdir(exist_ok=True, parents=True)
-    save_training_stats(training_stats, this_model_stats_dir / (str(EPOCHS) + ".h5"))
+    save_training_stats(
+        training_stats, this_model_stats_dir / (str(final_epoch) + ".h5")
+    )
 
 
 if __name__ == "__main__":
