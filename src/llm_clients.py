@@ -28,6 +28,8 @@ chat_completion_args = {
     "verbosity",
     "temperature",
     "timeout",
+    "tools",
+    "tool_choice",
 }
 
 file_path = os.path.abspath(__file__)

@@ -189,15 +189,35 @@ MODEL_SHORTHANDS = {
 }
 
 
-LLM_MODEL_NAMES = {"llm_gpt-4.1-nano", "llm_gpt-5-mini"}
+LLM_MODEL_NAMES = {
+    "llm_gpt-4.1-nano",
+    "llm_gpt-4.1-nano_single",
+    "llm_gpt-5-mini",
+    "rag_gpt-4.1-nano_k10",
+    "rag_gpt-4.1-nano_single_k10",
+}
 
 
 def get_model_name(
-    model_name, node_encoder, edge_encoder, query_encoder, multi, allow_llms=False
+    model_name: str, node_encoder, edge_encoder, query_encoder, multi, allow_llms=False
 ):
     if allow_llms:
-        if model_name in LLM_MODEL_NAMES:
-            return model_name
+        for llm_name in LLM_MODEL_NAMES:
+            if model_name == llm_name:
+                return model_name
+            if model_name.startswith(llm_name + "/"):
+                return (
+                    llm_name
+                    + "/"
+                    + get_model_name(
+                        model_name[len(llm_name) + 1 :],
+                        node_encoder=node_encoder,
+                        edge_encoder=edge_encoder,
+                        query_encoder=query_encoder,
+                        multi=multi,
+                        allow_llms=allow_llms,
+                    )
+                )
     while model_name in MODEL_SHORTHANDS:
         model_name = MODEL_SHORTHANDS[model_name]
     return canonical_model_name(

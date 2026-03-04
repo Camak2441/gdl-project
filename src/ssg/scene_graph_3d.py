@@ -1,3 +1,4 @@
+import copy
 import json
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -10,7 +11,7 @@ from torch_geometric.data import Data
 
 from graphviz import Digraph
 from plyfile import PlyData
-from consts import MESH_FILE, PCD_FILE, RSCAN_DIR, SEMSEG_FILE
+from consts import MESH_FILE, MESH_SEGS_FILE, PCD_FILE, RSCAN_DIR, SEMSEG_FILE
 from utils import invert_dict
 
 
@@ -68,6 +69,7 @@ class SceneGraph3D:
         self.scan_id = None
         self.objects3d = None
         self.pointcloud = None
+        self.segs_data = None
 
     def __getitem__(self, index):
         return self.graph.nodes[index]
@@ -110,10 +112,11 @@ class SceneGraph3D:
     def add_node(self, id, attribubtes_dict):
         self.graph.add_node(int(id), **attribubtes_dict)
 
-    def read_3d_scene(self, file3d, pointcloud3dfile, mesh3dfile):
+    def read_3d_scene(self, file3d, pointcloud3dfile, mesh3dfile, meshsegfile):
         # add the 3d informations about the scene given the semseg.v2.json file
         self.pointcloud = PlyData.read(open(pointcloud3dfile))
         self.mesh = o3d.io.read_triangle_mesh(mesh3dfile)
+        self.segs_data = json.load(open(meshsegfile))
 
         data = json.load(open(file3d))
         # they must have the same scan_id
@@ -127,8 +130,12 @@ class SceneGraph3D:
         file_3d_path: Path = RSCAN_DIR / self.scan_id / SEMSEG_FILE
         file_pointcloud: Path = RSCAN_DIR / self.scan_id / PCD_FILE
         file_mesh: Path = RSCAN_DIR / self.scan_id / MESH_FILE
+        file_mesh_segs: Path = RSCAN_DIR / self.scan_id / MESH_SEGS_FILE
         self.read_3d_scene(
-            file_3d_path.as_posix(), file_pointcloud.as_posix(), file_mesh.as_posix()
+            file_3d_path.as_posix(),
+            file_pointcloud.as_posix(),
+            file_mesh.as_posix(),
+            file_mesh_segs.as_posix(),
         )
 
     def get_object_pointcloud(self, node_id, return_mask=False):
@@ -153,15 +160,40 @@ class SceneGraph3D:
             return obj_pcd, obj_mask
         return obj_pcd
 
-    # def get_object_mesh(self, node_id):
-    #     # return the mesh of the object in 3d
-    #     if self.mesh is None or self.objects3d is None:
-    #         return None
-    #     obj = self.objects3d[node_id]
-    #     segments = obj["segments"]
-    #     segments = list(range(1, 101))
-    #     mesh = self.mesh.select_by_index(segments, cleanup=True)
-    #     return mesh
+    def get_object_mesh(self, node_id):
+        from scipy.spatial import cKDTree
+
+        # return the mesh of the object in 3d
+        if self.mesh is None or self.objects3d is None or self.segs_data is None:
+            return None
+        ply_verts = self.pointcloud["vertex"]
+        ply_xyz = np.vstack((ply_verts["x"], ply_verts["y"], ply_verts["z"])).T
+        ply_obj_ids = np.asarray(ply_verts["objectId"])
+
+        # Map PLY labels onto OBJ vertices via nearest-neighbour
+        obj_verts = np.asarray(self.mesh.vertices)
+        tree = cKDTree(ply_xyz)
+        _, nn_indices = tree.query(obj_verts, workers=-1)
+        obj_vertex_labels = ply_obj_ids[nn_indices]
+
+        vertex_indices = np.where(obj_vertex_labels == node_id)[0].tolist()
+        return self.mesh.select_by_index(vertex_indices, cleanup=True), vertex_indices
+
+    def get_colored_objects(self, node_ids, colors):
+        mesh = copy.deepcopy(self.mesh)
+        meshes = [mesh]
+        triangles = np.asarray(self.mesh.triangles)  # (n_triangles, 3)
+        tri_indices_to_remove = []
+        for node_id, color in zip(node_ids, colors):
+            obj_mesh, vert_indices = self.get_object_mesh(node_id)
+            obj_mesh.paint_uniform_color(color)
+            meshes.append(obj_mesh)
+            # Find all triangles that contain any of the object's vertices
+            tri_mask = np.any(np.isin(triangles, vert_indices), axis=1)
+            tri_indices_to_remove.append(np.where(tri_mask)[0])
+        mesh.remove_triangles_by_index(np.concatenate(tri_indices_to_remove))
+        mesh.remove_unreferenced_vertices()
+        return meshes
 
     def get_node_centroid(self, node_id):
         # return the centroid of the object in 3d
@@ -185,7 +217,7 @@ class SceneGraph3D:
     def render(scenegraph, file):
         graph = Digraph()
         for id, o in scenegraph.nodes(data=True):
-            graph.node(str(id), o["label"])
+            graph.node(str(id), str(id) + ": " + o["label"])
         for n1, n2, d in scenegraph.edges(data=True):
             graph.edge(str(n1), str(n2), label=d["name"])
         graph.render(file, view=False)

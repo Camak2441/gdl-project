@@ -3,11 +3,13 @@ Calculate metrics from a saved model output file produced by eval_model.py.
 
 Usage:
     python scripts/calc_metrics.py <results_file.pth>
+    python scripts/calc_metrics.py <results_file.pth> --split_dir path/to/dataset/test
 """
 
 import argparse
 import json
 import math
+from pathlib import Path
 
 import torch
 
@@ -53,14 +55,54 @@ def top_n_recall(out: torch.Tensor, y: torch.Tensor, num_nodes: torch.Tensor):
     return sum(recalls) / len(recalls) if recalls else 0.0
 
 
+def per_q_precision_recall_accuracy_f1(
+    out: torch.Tensor, y: torch.Tensor, num_nodes: torch.Tensor
+):
+    """For each query, take the top-n predictions where n = number of positive nodes."""
+    recalls = []
+    precisions = []
+    accuracies = []
+    f1s = []
+    node_offset = 0
+    for n_nodes in num_nodes.tolist():
+        pred_q = out[node_offset : node_offset + n_nodes] >= THRESHOLD
+        y_q = y[node_offset : node_offset + n_nodes]
+        tp = (pred_q & y_q.bool()).sum().item()
+        fp = (pred_q & ~y_q.bool()).sum().item()
+        fn = (~pred_q & y_q.bool()).sum().item()
+        tn = (~pred_q & ~y_q.bool()).sum().item()
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+        accuracy = (tp + tn) / n_nodes if n_nodes > 0 else 0
+        f1 = (
+            2 * precision * recall / (precision + recall)
+            if precision + recall > 0
+            else 0
+        )
+        recalls.append(recall)
+        precisions.append(precision)
+        accuracies.append(accuracy)
+        f1s.append(f1)
+        node_offset += n_nodes
+    assert len(precisions) == len(num_nodes)
+    assert len(recalls) == len(num_nodes)
+    assert len(accuracies) == len(num_nodes)
+    assert len(f1s) == len(num_nodes)
+    return (
+        sum(precisions) / len(precisions) if precisions else 0.0,
+        sum(recalls) / len(recalls) if recalls else 0.0,
+        sum(accuracies) / len(accuracies) if accuracies else 0.0,
+        sum(f1s) / len(f1s) if f1s else 0.0,
+    )
+
+
 def recall_n(n: int, out: torch.Tensor, y: torch.Tensor, num_nodes: torch.Tensor):
     recalls = []
     node_offset = 0
     for n_nodes in num_nodes.tolist():
         out_q = out[node_offset : node_offset + n_nodes]
         y_q = y[node_offset : node_offset + n_nodes]
-        ranking = torch.sum((torch.argsort(out_q, descending=True) + 1) * y_q).item()
-        if ranking > 0 and ranking <= n:
+        if torch.sum(y_q[torch.argsort(out_q, descending=True)[:n]]) >= 1:
             recalls.append(1)
         else:
             recalls.append(0)
@@ -72,6 +114,9 @@ def compute_metrics(
     out: torch.Tensor, y: torch.Tensor, num_nodes: torch.Tensor, multi: bool = True
 ):
     precision, recall, accuracy, f1 = precision_recall_accuracy_f1(out, y)
+    per_q_precision, per_q_recall, per_q_accuracy, per_q_f1 = (
+        per_q_precision_recall_accuracy_f1(out, y, num_nodes)
+    )
     metrics = {
         "precision": precision,
         "recall": recall,
@@ -80,6 +125,11 @@ def compute_metrics(
         "top_n_recall": top_n_recall(out, y, num_nodes),
         "mae": (out - y).abs().mean().item(),
         "mse": ((out - y) ** 2).mean().item(),
+        "qs": num_nodes.shape[0],
+        "per_q_precision": per_q_precision,
+        "per_q_recall": per_q_recall,
+        "per_q_accuracy": per_q_accuracy,
+        "per_q_f1": per_q_f1,
     }
     if not multi:
         for i in [1, 3, 5, 10]:
@@ -93,25 +143,75 @@ def print_metrics(metrics: dict, indent: int = 0):
         print(f"{pad}{key}: {value:.4f}")
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Calculate metrics from a saved model output file."
+def split_results_by_seen_unseen(
+    out: torch.Tensor,
+    y: torch.Tensor,
+    qtype: torch.Tensor,
+    num_nodes: torch.Tensor,
+    split_dir: Path,
+) -> tuple[dict, dict]:
+    """Split flattened results tensors into seen and unseen subsets.
+
+    "Seen" means the scan appeared in the training split.
+    "Unseen" means the scan only appears in test/val, never in training.
+
+    Returns:
+        (seen, unseen) where each is a dict with keys: out, y, qtype, num_nodes
+    """
+    dataset_dir = split_dir.parent
+    train_questions_dir = dataset_dir / "train" / "questions"
+    train_scan_ids = (
+        {p.stem for p in train_questions_dir.glob("*.pth")}
+        if train_questions_dir.exists()
+        else set()
     )
-    parser.add_argument("results_file", type=str, help="Path to the .pth results file.")
-    args = parser.parse_args()
 
-    results = torch.load(args.results_file, map_location="cpu", weights_only=False)
-    out = results["out"]
-    y = results["y"]
-    qtype = results["qtype"]
-    num_nodes = results["num_nodes"]
+    # Read question files in sorted order (matches dataset/eval ordering)
+    questions_dir = split_dir / "questions"
+    scan_info = []  # [(scan_id, n_queries), ...]
+    for qf in sorted(questions_dir.glob("*.pth")):
+        q = torch.load(qf, weights_only=False)
+        n_queries = q["y"].shape[0]
+        scan_info.append((q["scanId"], n_queries))
 
-    print("=== Overall ===")
-    overall = compute_metrics(out, y, num_nodes)
-    print_metrics(overall)
+    # Build per-query and per-node boolean masks
+    seen_query_mask = []
+    unseen_query_mask = []
+    seen_node_mask = []
+    unseen_node_mask = []
 
-    print("\n=== By question type ===")
-    # qtype is per-query; expand to per-node for masking
+    query_offset = 0
+    for scan_id, n_queries in scan_info:
+        is_seen = scan_id in train_scan_ids
+        for _ in range(n_queries):
+            n_nodes = int(num_nodes[query_offset].item())
+            seen_query_mask.append(is_seen)
+            unseen_query_mask.append(not is_seen)
+            seen_node_mask.extend([is_seen] * n_nodes)
+            unseen_node_mask.extend([not is_seen] * n_nodes)
+            query_offset += 1
+
+    seen_qm = torch.tensor(seen_query_mask)
+    unseen_qm = torch.tensor(unseen_query_mask)
+    seen_nm = torch.tensor(seen_node_mask)
+    unseen_nm = torch.tensor(unseen_node_mask)
+
+    seen = {
+        "out": out[seen_nm],
+        "y": y[seen_nm],
+        "qtype": qtype[seen_qm],
+        "num_nodes": num_nodes[seen_qm],
+    }
+    unseen = {
+        "out": out[unseen_nm],
+        "y": y[unseen_nm],
+        "qtype": qtype[unseen_qm],
+        "num_nodes": num_nodes[unseen_qm],
+    }
+    return seen, unseen
+
+
+def compute_and_print_by_qtype(out, y, qtype, num_nodes, multi, indent=2):
     qtype_per_node = qtype.repeat_interleave(num_nodes)
     qtype_vals = qtype.unique().tolist()
     by_qtype = {}
@@ -120,17 +220,102 @@ def main():
         name = Q_TYPE_NAMES.get(qt, str(qt))
         node_mask = qtype_per_node == qt
         query_mask = qtype == qt
-        out_qt = out[node_mask]
-        y_qt = y[node_mask]
-        num_nodes_qt = num_nodes[query_mask]
-        print(f"\n  [{name}]")
-        metrics_qt = compute_metrics(out_qt, y_qt, num_nodes_qt)
-        print_metrics(metrics_qt, indent=4)
+        print(f"\n{' ' * indent}[{name}]")
+        metrics_qt = compute_metrics(
+            out[node_mask], y[node_mask], num_nodes[query_mask], multi
+        )
+        print_metrics(metrics_qt, indent=indent + 4)
         by_qtype[name] = metrics_qt
+    return by_qtype
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Calculate metrics from a saved model output file."
+    )
+    parser.add_argument("results_file", type=str, help="Path to the .pth results file.")
+    parser.add_argument(
+        "--split_dir",
+        type=Path,
+        default=None,
+        help=(
+            "Path to the dataset split directory (e.g. data/dataset_balanced/.../test). "
+            "When provided, also reports metrics broken down by seen vs unseen scenes."
+        ),
+    )
+    parser.add_argument(
+        "--multi",
+        action="store_true",
+        help=("If the model is a multi-answer model, set this to true."),
+    )
+    args = parser.parse_args()
+
+    results = torch.load(args.results_file, map_location="cpu", weights_only=False)
+    out = results["out"]
+    y = results["y"]
+    qtype = results["qtype"]
+    num_nodes = results["num_nodes"]
+    multi = args.multi
+
+    print("=== Overall ===")
+    overall = compute_metrics(out, y, num_nodes, multi)
+    print_metrics(overall)
+
+    print("\n=== By question type ===")
+    by_qtype = compute_and_print_by_qtype(out, y, qtype, num_nodes, multi)
+
+    output = {"overall": overall, "by_qtype": by_qtype}
+
+    if args.split_dir is not None:
+        split_dir = args.split_dir
+        if not split_dir.exists():
+            print(
+                f"\nWarning: split_dir not found: {split_dir}. Skipping seen/unseen breakdown."
+            )
+        else:
+            seen, unseen = split_results_by_seen_unseen(
+                out, y, qtype, num_nodes, split_dir
+            )
+
+            n_seen_q = int(seen["qtype"].shape[0])
+            n_unseen_q = int(unseen["qtype"].shape[0])
+
+            print(f"\n=== Seen scenes ({n_seen_q} queries) ===")
+            seen_overall = compute_metrics(
+                seen["out"], seen["y"], seen["num_nodes"], multi
+            )
+            print_metrics(seen_overall)
+            print("\n  By question type:")
+            seen_by_qtype = compute_and_print_by_qtype(
+                seen["out"],
+                seen["y"],
+                seen["qtype"],
+                seen["num_nodes"],
+                multi,
+                indent=4,
+            )
+
+            print(f"\n=== Unseen scenes ({n_unseen_q} queries) ===")
+            unseen_overall = compute_metrics(
+                unseen["out"], unseen["y"], unseen["num_nodes"], multi
+            )
+            print_metrics(unseen_overall)
+            print("\n  By question type:")
+            unseen_by_qtype = compute_and_print_by_qtype(
+                unseen["out"],
+                unseen["y"],
+                unseen["qtype"],
+                unseen["num_nodes"],
+                multi,
+                indent=4,
+            )
+
+            output["seen"] = {"overall": seen_overall, "by_qtype": seen_by_qtype}
+            output["unseen"] = {"overall": unseen_overall, "by_qtype": unseen_by_qtype}
 
     out_path = args.results_file.replace(".pth", "_metrics.json")
     with open(out_path, "w") as f:
-        json.dump({"overall": overall, "by_qtype": by_qtype}, f, indent=2)
+        json.dump(output, f, indent=2)
     print(f"\nSaved metrics to {out_path}")
 
 

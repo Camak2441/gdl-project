@@ -11,10 +11,10 @@ Results are saved in the same format as eval_llm.py:
     }
 
 Usage:
-    python scripts/eval_rag.py
-    python scripts/eval_rag.py --interactive
-    python scripts/eval_rag.py --splits test val
-    python scripts/eval_rag.py --k 5
+    python scripts/eval_rag_single.py
+    python scripts/eval_rag_single.py --interactive
+    python scripts/eval_rag_single.py --splits test val
+    python scripts/eval_rag_single.py --k 5
 """
 
 import argparse
@@ -55,7 +55,7 @@ QUERY_ENCODER = "all_minilm_l6v2"
 
 DATASET_DIR = (
     DATA_DIR
-    / "dataset_balanced"
+    / "dataset_single_balanced"
     / ";".join([EDGE_ENCODER, NODE_ENCODER, QUERY_ENCODER])
 )
 
@@ -83,11 +83,12 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = """\
-You are answering questions about a 3D scene graph describing a real room.
+You are answering questions about a 3D scene graph describing a real room. 
 
 Use the search_scene_graph tool to retrieve the most relevant objects and \
 relationships for the question. Then, based on the retrieved information, \
-identify all object ids that answer the question.
+list the objects which you think might answer the question, in order of how likely you think that they are correct. \
+Please return at least five items. There is no penalty for returning more potential answers objects. 
 
 Respond with a JSON object only, in exactly this format (no other text):
 {"answerObjectIds": ["<id>", ...]}
@@ -201,6 +202,8 @@ def ask_llm_with_tool(
 
     tool_call = msg1.tool_calls[0]
     gnn_query_text = json.loads(tool_call.function.arguments).get("query", question)
+
+    gnn_query_text = question
     logger.info("GNN query written by LLM: %r", gnn_query_text)
 
     # Encode the LLM-generated query and run the GNN
@@ -321,7 +324,7 @@ def get_available_models() -> list[str]:
 
 
 def get_available_datasets() -> list[str]:
-    base = DATA_DIR / "dataset_balanced"
+    base = DATA_DIR / "dataset_single_balanced"
     return sorted(p.name for p in base.iterdir() if p.is_dir()) if base.exists() else []
 
 
@@ -391,14 +394,14 @@ def main():
                         print("No datasets found.")
                         return
                     dataset_enc = select_interactively(datasets, "Select a dataset:")
-                    dataset_dir = DATA_DIR / "dataset_balanced" / dataset_enc
+                    dataset_dir = DATA_DIR / "dataset_single_balanced" / dataset_enc
             else:
                 datasets = get_available_datasets()
                 if not datasets:
                     print("No datasets found.")
                     return
                 dataset_enc = select_interactively(datasets, "Select a dataset:")
-                dataset_dir = DATA_DIR / "dataset_balanced" / dataset_enc
+                dataset_dir = DATA_DIR / "dataset_single_balanced" / dataset_enc
         else:
             datasets = get_available_datasets()
             if not datasets:
@@ -441,7 +444,7 @@ def main():
     # Summarise calls, accounting for incremental progress
     split_counts = {s: count_questions_in_split(dataset_dir / s) for s in splits}
 
-    out_dir = RESULTS_OUT_DIR / f"rag_{llm_model_name}_k{k}" / gnn_model_name
+    out_dir = RESULTS_OUT_DIR / f"rag_{llm_model_name}_single_k{k}" / gnn_model_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
     already_done = {}
@@ -459,7 +462,7 @@ def main():
     print(f"\nGNN model:  {gnn_model_name}")
     print(f"Weights:    {model_path.name} ({most_epochs} epochs)")
     print(f"LLM model:  {llm_model_name}")
-    print(f"Dataset:    {dataset_dir.name}")
+    print(f"Dataset:    {dataset_dir}")
     print(f"k:          {k}")
     for s in splits:
         done, total = already_done[s], split_counts[s]
@@ -490,7 +493,7 @@ def main():
         handlers=[logging.StreamHandler()],
     )
     logger.info(
-        "Starting eval_rag: gnn=%s llm=%s dataset=%s splits=%s k=%d",
+        "Starting eval_single_rag: gnn=%s llm=%s dataset=%s splits=%s k=%d",
         gnn_model_name,
         llm_model_name,
         dataset_dir.name,
@@ -612,12 +615,15 @@ def main():
                         i,
                         answer_ids,
                     )
-                    answer_set = {str(a) for a in answer_ids}
-                    scan_out.append(
-                        torch.tensor(
-                            [1.0 if str(n) in answer_set else 0.0 for n in node_map]
-                        )
-                    )
+                    out = [0] * len(node_map)
+                    rank = 1
+                    for id in answer_ids:
+                        if str(id) in node_map:
+                            out[node_map.index(str(id))] = 1.0 / rank
+                            rank += 1
+                        else:
+                            logger.info(f"LLM returned invalid node id {id}")
+                    scan_out.append(torch.tensor(out))
                 except Exception as e:
                     logger.error(
                         "ERROR [%d/%d] scan=%s q=%d error=%s",

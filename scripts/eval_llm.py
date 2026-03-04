@@ -47,6 +47,12 @@ DATASET_DIR = (
     / ";".join([EDGE_ENCODER, NODE_ENCODER, QUERY_ENCODER])
 )
 
+DATASET_SINGLE_DIR = (
+    DATA_DIR
+    / "dataset_single_balanced"
+    / ";".join([EDGE_ENCODER, NODE_ENCODER, QUERY_ENCODER])
+)
+
 SCENE_GRAPHS_DIR = DATA_DIR / "scene_graphs"
 EMBEDDED_SG_DIR = (
     DATA_DIR / "embedded_scene_graphs" / ";".join([EDGE_ENCODER, NODE_ENCODER])
@@ -65,6 +71,22 @@ You are given a 3D scene graph describing a real room. The scene graph contains:
   For example: ["5", "2", "to the right of"] means object 5 is to the right of object 2
 
 You will be asked a question about the scene. Identify all objects whose ids answer the question.
+
+Respond with a JSON object only, in exactly this format (no other text):
+{"answerObjectIds": ["<id>", ...]}
+"""
+
+SINGLE_SYSTEM_PROMPT = """\
+You are given a 3D scene graph describing a real room. The scene graph contains:
+- objects: a list of objects, each with an id, label, affordances, and attributes
+- relationships: a list of [from_id, to_id, relationship_label] triples
+  Read as: the object with from_id is/has relationship_label relative to the object with to_id
+  For example: ["5", "2", "to the right of"] means object 5 is to the right of object 2
+
+You will be asked a question about the scene. \
+This question will have exactly one answer object. \
+Return a list of the objects which you think might answer the question, in order of how likely you think that they are correct. \
+Please return at least five items. There is no penalty for returning more potential answers objects. 
 
 Respond with a JSON object only, in exactly this format (no other text):
 {"answerObjectIds": ["<id>", ...]}
@@ -115,11 +137,10 @@ def extract_answer_ids(text: str) -> list[str] | None:
     return None
 
 
-def ask_llm(client, processed_sg: dict, question: str) -> list[str]:
-    """Ask the LLM which object IDs answer the question. Returns list of ID strings."""
+def get_prompt(processed_sg: dict, question: str, multi: bool):
     sg_str = json.dumps(processed_sg, indent=2)
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+    return [
+        {"role": "system", "content": SYSTEM_PROMPT if multi else SINGLE_SYSTEM_PROMPT},
         {
             "role": "user",
             "content": (
@@ -127,6 +148,11 @@ def ask_llm(client, processed_sg: dict, question: str) -> list[str]:
             ),
         },
     ]
+
+
+def ask_llm(client, messages) -> list[str]:
+    """Ask the LLM which object IDs answer the question. Returns list of ID strings."""
+    messages = messages
     response = client.create_completion(messages)
     ids = extract_answer_ids(response.choices[0].message.content)
     return ids if ids is not None else []
@@ -176,6 +202,11 @@ def main():
         help="Interactively select LLM model and dataset.",
     )
     parser.add_argument(
+        "--multi",
+        action="store_true",
+        help="Interactively select LLM model and dataset.",
+    )
+    parser.add_argument(
         "--splits",
         nargs="+",
         default=["test"],
@@ -183,9 +214,13 @@ def main():
         help="Dataset splits to run on (default: test).",
     )
     args = parser.parse_args()
+    multi = args.multi
 
     model_name = MODEL
-    dataset_dir = DATASET_DIR
+    if multi:
+        dataset_dir = DATASET_DIR
+    else:
+        dataset_dir = DATASET_SINGLE_DIR
 
     if args.interactive:
         datasets = get_available_datasets()
@@ -213,7 +248,9 @@ def main():
     # Summarise calls before doing anything, accounting for existing progress
     split_counts = {s: count_questions_in_split(dataset_dir / s) for s in splits}
 
-    out_dir = RESULTS_OUT_DIR / f"llm_{model_name}"
+    out_dir = RESULTS_OUT_DIR / "_".join(
+        ("llm", f"{model_name}", *([] if multi else ["single"]))
+    )
     out_dir.mkdir(parents=True, exist_ok=True)
 
     already_done = {}
@@ -257,6 +294,8 @@ def main():
         splits,
     )
 
+    first = True
+
     for split in splits:
         split_total = split_counts[split]
         print(f"\n=== {split} ({split_total} questions) ===")
@@ -286,6 +325,7 @@ def main():
         all_num_nodes = []
 
         for qf in question_files:
+
             q_data = torch.load(qf, weights_only=False)
             scan_id = q_data["scanId"]
             dataset_y = q_data["y"]  # [N, num_nodes]
@@ -293,11 +333,27 @@ def main():
             question_texts = q_data["question"]  # list[str], length N
             n_questions, n_nodes = dataset_y.shape
 
+            # Load scene graph files
+            sg_emb_path = EMBEDDED_SG_DIR / (scan_id + ".pth")
+            sg_path = SCENE_GRAPHS_DIR / (scan_id + ".json")
+
             # Resume: reuse cached scan result without making any new calls
             if scan_id in progress:
                 cached = progress[scan_id]
                 all_out.append(cached["out"])
                 all_y.append(cached["y"])
+                if cached["out"].shape != cached["y"].shape:
+                    node_map = torch.load(sg_emb_path, weights_only=False)["node_map"]
+                    logger.info(
+                        f'Scan {scan_id} has an out shape of {cached["out"].shape} and a y shape of {cached["y"].shape}.'
+                    )
+                    logger.info(
+                        f'Scan {scan_id} has {cached["num_nodes"][0]} nodes and a node map of size {len(node_map)}.'
+                    )
+                    progress.pop(scan_id)
+                    torch.save(progress, progress_file)
+                    logger.info(f"Removed {scan_id} from progress.")
+
                 all_qtype.append(cached["qtype"])
                 all_num_nodes.append(cached["num_nodes"])
                 logger.info(
@@ -306,10 +362,6 @@ def main():
                     n_questions,
                 )
                 continue
-
-            # Load scene graph files
-            sg_emb_path = EMBEDDED_SG_DIR / (scan_id + ".pth")
-            sg_path = SCENE_GRAPHS_DIR / (scan_id + ".json")
 
             missing = [p for p in (sg_emb_path, sg_path) if not p.exists()]
             if missing:
@@ -321,6 +373,9 @@ def main():
                 continue
 
             node_map = torch.load(sg_emb_path, weights_only=False)["node_map"]
+            assert (
+                len(node_map) == n_nodes
+            ), f"Expected node_map to have {n_nodes} nodes, received {len(node_map)} nodes"
 
             with open(sg_path) as f:
                 processed_sg = preprocess_scene_graph(json.load(f))
@@ -346,7 +401,15 @@ def main():
                         attempt,
                     )
                     try:
-                        answer_ids = ask_llm(client, processed_sg, question_text)
+                        messages = get_prompt(processed_sg, question_text, multi)
+                        if first:
+                            logger.info("Executing prompt: " + str(messages))
+                            answer = input("Confirm this is correct?: [y/N] ")
+                            if answer not in ("y", "yes"):
+                                print("Aborted.")
+                                return
+                            first = False
+                        answer_ids = ask_llm(client, messages)
                         logger.info(
                             "REPLY [%d/%d] scan=%s q=%d answer_ids=%s",
                             call_num,
@@ -355,16 +418,30 @@ def main():
                             i,
                             answer_ids,
                         )
-                        answer_set = {str(a) for a in answer_ids}
-                        scan_out.append(
-                            torch.tensor(
-                                [1.0 if str(n) in answer_set else 0.0 for n in node_map]
+                        if multi:
+                            answer_set = {str(a) for a in answer_ids}
+                            scan_out.append(
+                                torch.tensor(
+                                    [
+                                        1.0 if str(n) in answer_set else 0.0
+                                        for n in node_map
+                                    ]
+                                )
                             )
-                        )
+                        else:
+                            out = [0] * len(node_map)
+                            rank = 1
+                            for id in answer_ids:
+                                if str(id) in node_map:
+                                    out[node_map.index(str(id))] = 1.0 / rank
+                                    rank += 1
+                                else:
+                                    logger.info(f"LLM returned invalid node id {id}")
+                            scan_out.append(torch.tensor(out))
                         break
                     except openai.RateLimitError as e:
                         logger.error(
-                            "[%d/%d] scan=%s q=%d error=%s retrying",
+                            "[%d/%d] scan=%s q=%d error=%s waiting then retrying",
                             call_num,
                             split_total,
                             scan_id,
@@ -374,14 +451,14 @@ def main():
                         time.sleep(5)
                     except Exception as e:
                         logger.error(
-                            "[%d/%d] scan=%s q=%d error=%s retrying",
+                            "[%d/%d] scan=%s q=%d error=%s failing",
                             call_num,
                             split_total,
                             scan_id,
                             i,
                             e,
                         )
-                        break
+                        raise e
                 else:
                     logger.error(
                         "[%d/%d] scan=%s q=%d failed scan so adding zeros",

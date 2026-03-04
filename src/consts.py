@@ -13,6 +13,7 @@ OUTPUT_DIR = PROJECT_ROOT / "outputs"
 SEMSEG_FILE = "semseg.v2.json"
 PCD_FILE = "labels.instances.annotated.v2.ply"
 MESH_FILE = "mesh.refined.v2.obj"
+MESH_SEGS_FILE = "mesh.refined.0.010000.segs.v2.json"
 
 
 Q_TYPES = {

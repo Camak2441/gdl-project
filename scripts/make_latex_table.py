@@ -101,8 +101,21 @@ def make_table(
     sig_figs: int,
     caption: str = "",
     label: str = "tab:results",
+    scene_split: str | None = None,
+    qtype_filter: str | None = None,
 ) -> str:
-    qtypes = ["overall"] + list(QTYPE_DISPLAY.keys())[1:] if by_qtype else ["overall"]
+    # qtype_filter selects a single question type; by_qtype shows all types.
+    # qtype_filter takes precedence (they are mutually exclusive at the CLI level).
+    if qtype_filter is not None:
+        qtypes = [qtype_filter]
+    elif by_qtype:
+        qtypes = ["overall"] + list(QTYPE_DISPLAY.keys())[1:]
+    else:
+        qtypes = ["overall"]
+
+    # Show a group-header row when there are multiple groups or when a single
+    # qtype is selected (to make the filter context visible in the table).
+    show_group_header = len(qtypes) > 1 or qtype_filter is not None
 
     # Build column spec
     # Model | [qtype group: metric cols]*
@@ -118,7 +131,7 @@ def make_table(
     lines.append(rf"\begin{{tabular}}{{{col_spec}}}")
     lines.append(r"\toprule")
 
-    if by_qtype:
+    if show_group_header:
         # Header row 1: qtype groups
         qtype_header_parts = [""]
         for qt in qtypes:
@@ -129,7 +142,7 @@ def make_table(
         lines.append(" & ".join(qtype_header_parts) + r" \\")
         # Cmidrule under each group
         cmidrules = []
-        for i, _ in enumerate(qtypes):
+        for i in range(len(qtypes)):
             start = 2 + i * len(selected_metrics)
             end = start + len(selected_metrics) - 1
             cmidrules.append(rf"\cmidrule(lr){{{start}-{end}}}")
@@ -146,11 +159,13 @@ def make_table(
     # Data rows
     for label_str, data in zip(row_labels, metrics_data):
         row = [latex_escape(label_str)]
+        # Navigate into seen/unseen sub-dict when scene_split is specified
+        base = data.get(scene_split, {}) if scene_split else data
         for qt in qtypes:
             if qt == "overall":
-                metrics = data.get("overall", {})
+                metrics = base.get("overall", {})
             else:
-                metrics = data.get("by_qtype", {}).get(qt, {})
+                metrics = base.get("by_qtype", {}).get(qt, {})
             for m in selected_metrics:
                 row.append(fmt(metrics.get(m), sig_figs))
         lines.append(" & ".join(row) + r" \\")
@@ -197,6 +212,28 @@ def main():
         help="Break down metrics by question type.",
     )
     parser.add_argument(
+        "--qtype",
+        choices=list(QTYPE_DISPLAY.keys())[1:],
+        default=None,
+        metavar="QTYPE",
+        help=(
+            "Show metrics for a single question type only "
+            f"(choices: {', '.join(list(QTYPE_DISPLAY.keys())[1:])}). "
+            "Mutually exclusive with --by-qtype."
+        ),
+    )
+    parser.add_argument(
+        "--scene-split",
+        choices=["seen", "unseen"],
+        default=None,
+        metavar="SCENE_SPLIT",
+        help=(
+            "Filter to seen or unseen scenes (seen = scene graph was in training set, "
+            "unseen = scene graph was held out). Requires the metrics file to have been "
+            "generated with seen/unseen breakdown."
+        ),
+    )
+    parser.add_argument(
         "--sig-figs",
         type=int,
         default=3,
@@ -225,6 +262,9 @@ def main():
 
     if args.row_labels and len(args.row_labels) != len(args.models):
         parser.error("--row-labels must have the same number of entries as models.")
+
+    if args.by_qtype and args.qtype:
+        parser.error("--by-qtype and --qtype are mutually exclusive.")
 
     selected_metrics = args.metrics
     if selected_metrics is None:
@@ -290,6 +330,8 @@ def main():
         sig_figs=args.sig_figs,
         caption=args.caption,
         label=args.label,
+        scene_split=args.scene_split,
+        qtype_filter=args.qtype,
     )
     print(table)
 

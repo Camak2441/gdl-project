@@ -31,6 +31,25 @@ def collect_sizes_for_dir(sg_dir: Path) -> tuple[list[int], list[int]]:
     return node_counts, edge_counts
 
 
+def collect_sizes_for_dir_seen_unseen(
+    sg_dir: Path, train_dir: Path
+) -> tuple[list[int], list[int]]:
+    seen_node_counts: list[int] = []
+    seen_edge_counts: list[int] = []
+    unseen_node_counts: list[int] = []
+    unseen_edge_counts: list[int] = []
+    for path in sorted(sg_dir.glob("*.pth")):
+        if (train_dir / (path.stem + ".pth")).exists():
+            sg = torch.load(path, weights_only=False)
+            seen_node_counts.append(sg.x.shape[0])
+            seen_edge_counts.append(sg.edge_index.shape[1])
+        else:
+            sg = torch.load(path, weights_only=False)
+            unseen_node_counts.append(sg.x.shape[0])
+            unseen_edge_counts.append(sg.edge_index.shape[1])
+    return seen_node_counts, seen_edge_counts, unseen_node_counts, unseen_edge_counts
+
+
 def print_stats(label: str, counts: list[int], unit: str) -> None:
     if not counts:
         print(f"  {label} ({unit}): no data")
@@ -83,6 +102,15 @@ def process_source(source: Path) -> None:
         print(f"\n[{split}] ({len(nodes)} scene graphs)")
         print_stats("nodes", nodes, "nodes")
         print_stats("edges", edges, "relations")
+
+        if split != "train":
+            seen_nodes, seen_edges, unseen_nodes, unseen_edges = (
+                collect_sizes_for_dir_seen_unseen(sg_dir, split_dirs["train"])
+            )
+            print_stats("seen nodes", seen_nodes, "seen nodes")
+            print_stats("seen edges", seen_edges, "seen relations")
+            print_stats("unseen nodes", unseen_nodes, "unseen nodes")
+            print_stats("unseen edges", unseen_edges, "unseen relations")
 
         for path in sorted(sg_dir.glob("*.pth")):
             if path.stem not in seen_stems:

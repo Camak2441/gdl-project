@@ -32,7 +32,7 @@ class QueryGATv2Conv(torch.nn.Module):
         :param edge_attr: Edge features [num_edge, edge_dim]
         :param query: Query [num graphs, query_dim]
         :param batch: Batch indices [num_nodes]
-        :returns: Updated node features [num_nodes, out_dim].
+        :returns: Updated node features [num_nodes, out_dim * heads].
         """
         x = torch.cat(
             [
